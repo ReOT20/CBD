@@ -4,14 +4,17 @@ import json
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import geopandas as gpd
 import numpy as np
 import rasterio
 from pydantic import BaseModel, Field
+from rasterio import DatasetReader
 from rasterio.errors import RasterioError
+from rasterio.features import shapes
 from rasterio.mask import mask
 from rasterio.transform import array_bounds
-from scipy.ndimage import generic_filter
-from shapely.geometry import mapping
+from scipy.ndimage import generic_filter, label
+from shapely.geometry import mapping, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
@@ -36,6 +39,10 @@ class TerrainPreprocessingError(ValueError):
 
 
 class TerrainDerivativesError(ValueError):
+    pass
+
+
+class TerrainCandidatesError(ValueError):
     pass
 
 
@@ -135,6 +142,49 @@ class TerrainDerivativesSummary(BaseModel):
     total_derivative_rasters_written: int
     relief_window_size: int
     records: list[DerivedRasterRecord]
+
+
+class TerrainCandidateRecord(BaseModel):
+    candidate_id: str
+    aoi_id: str
+    split: str
+    terrain_source_id: str
+    source_raster_stem: str
+    output_vector_path: str
+    pixel_count: int
+    area_map_units: float
+    bbox_width: float
+    bbox_height: float
+    bbox_aspect_ratio: float
+    mean_local_relief: float
+    max_local_relief: float
+    mean_slope: float
+    max_slope: float
+
+
+class CandidateVectorArtifactRecord(BaseModel):
+    aoi_id: str
+    split: str
+    terrain_source_id: str
+    source_raster_stem: str
+    input_raster_path: str
+    candidate_vector_path: str
+    candidate_count: int
+
+
+class TerrainCandidatesSummary(BaseModel):
+    project_name: str
+    project_root: str
+    terrain_derivatives_artifact: str
+    output_root: str
+    output_summary_path: str
+    total_input_groups_processed: int
+    total_candidate_vectors_written: int
+    total_candidates: int
+    relief_threshold: float
+    min_pixels: int
+    vectors: list[CandidateVectorArtifactRecord]
+    records: list[TerrainCandidateRecord]
 
 
 DERIVATIVE_OUTPUT_NODATA = -9999.0
@@ -340,6 +390,20 @@ def load_terrain_preprocessing_summary(path: str | Path) -> TerrainPreprocessing
         ) from exc
 
 
+def load_terrain_derivatives_summary(path: str | Path) -> TerrainDerivativesSummary:
+    artifact_path = Path(path).expanduser().resolve()
+    if not artifact_path.exists():
+        raise FileNotFoundError(f"Terrain derivatives artifact not found: {artifact_path}")
+    try:
+        return TerrainDerivativesSummary.model_validate_json(
+            artifact_path.read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise TerrainCandidatesError(
+            f"Failed to parse terrain derivatives artifact: {artifact_path}"
+        ) from exc
+
+
 def _load_clip_geometry(geometry_path: str | Path) -> tuple[BaseGeometry, str]:
     gdf = read_vector(geometry_path)
     gdf = clean_geometries(gdf)
@@ -367,6 +431,10 @@ def _coerce_nodata(value: float | int | str | None) -> float | None:
 
 
 def _default_preprocess_root(project_root: str | Path) -> Path:
+    return Path(project_root).expanduser().resolve() / "outputs" / "interim" / "terrain"
+
+
+def _default_candidates_root(project_root: str | Path) -> Path:
     return Path(project_root).expanduser().resolve() / "outputs" / "interim" / "terrain"
 
 
@@ -401,6 +469,15 @@ def _build_nodata_mask(array: np.ndarray, nodata: float | int | str | None) -> n
     if np.isnan(nodata_float):
         return np.isnan(array)
     return np.isclose(array, nodata_float)
+
+
+def _validate_candidate_parameters(relief_threshold: float, min_pixels: int) -> None:
+    if relief_threshold < 0.0:
+        raise TerrainCandidatesError(
+            f"Relief threshold must be >= 0, got {relief_threshold}."
+        )
+    if min_pixels < 1:
+        raise TerrainCandidatesError(f"Minimum pixels must be >= 1, got {min_pixels}.")
 
 
 def _compute_slope(
@@ -720,6 +797,289 @@ def derive_terrain_features(
 
 def write_terrain_derivatives_summary(
     summary: TerrainDerivativesSummary, output_path: str | Path
+) -> Path:
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+    return path
+
+
+def _group_derivative_records(
+    terrain_derivatives_summary: TerrainDerivativesSummary,
+) -> dict[tuple[str, str, str, str], dict[str, DerivedRasterRecord]]:
+    groups: dict[tuple[str, str, str, str], dict[str, DerivedRasterRecord]] = {}
+    for record in terrain_derivatives_summary.records:
+        input_raster_path = Path(record.input_raster_path).expanduser().resolve()
+        group_key = (
+            record.aoi_id,
+            record.split,
+            record.terrain_source_id,
+            input_raster_path.stem,
+        )
+        derivative_group = groups.setdefault(group_key, {})
+        derivative_group[record.derivative_name] = record
+    return groups
+
+
+def _ensure_matching_raster_grids(
+    reference_dataset: DatasetReader,
+    candidate_dataset: DatasetReader,
+    *,
+    reference_label: str,
+    candidate_label: str,
+) -> None:
+    if (
+        reference_dataset.width != candidate_dataset.width
+        or reference_dataset.height != candidate_dataset.height
+    ):
+        raise TerrainCandidatesError(
+            f"Mismatched raster shape for {reference_label} and {candidate_label}."
+        )
+    if reference_dataset.transform != candidate_dataset.transform:
+        raise TerrainCandidatesError(
+            f"Mismatched raster transform for {reference_label} and {candidate_label}."
+        )
+    if reference_dataset.crs != candidate_dataset.crs:
+        raise TerrainCandidatesError(
+            f"Mismatched raster CRS for {reference_label} and {candidate_label}."
+        )
+
+
+def _component_geometries(
+    labeled_components: np.ndarray,
+    transform: Any,
+) -> dict[int, BaseGeometry]:
+    component_shapes: dict[int, list[BaseGeometry]] = {}
+    for geom_mapping, value in shapes(
+        labeled_components.astype(np.int32),
+        mask=labeled_components > 0,
+        transform=transform,
+    ):
+        component_id = int(value)
+        if component_id <= 0:
+            continue
+        component_shapes.setdefault(component_id, []).append(
+            cast(BaseGeometry, shape(geom_mapping))
+        )
+    return {
+        component_id: cast(BaseGeometry, unary_union(parts))
+        for component_id, parts in component_shapes.items()
+    }
+
+
+def _empty_candidate_gdf(crs: Any) -> gpd.GeoDataFrame:
+    return gpd.GeoDataFrame(
+        {
+            "candidate_id": [],
+            "aoi_id": [],
+            "split": [],
+            "terrain_source_id": [],
+            "source_raster_stem": [],
+            "pixel_count": np.array([], dtype=np.int32),
+            "area_map_units": np.array([], dtype=np.float64),
+            "bbox_width": np.array([], dtype=np.float64),
+            "bbox_height": np.array([], dtype=np.float64),
+            "bbox_aspect_ratio": np.array([], dtype=np.float64),
+            "mean_local_relief": np.array([], dtype=np.float64),
+            "max_local_relief": np.array([], dtype=np.float64),
+            "mean_slope": np.array([], dtype=np.float64),
+            "max_slope": np.array([], dtype=np.float64),
+            "geometry": gpd.GeoSeries([], crs=crs),
+        },
+        geometry="geometry",
+        crs=crs,
+    )
+
+
+def _write_candidate_vector(gdf: gpd.GeoDataFrame, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    gdf.to_file(output_path, driver="GeoJSON")
+
+
+def generate_terrain_candidates(
+    terrain_derivatives_summary: TerrainDerivativesSummary,
+    *,
+    output_root: str | Path | None = None,
+    relief_threshold: float = 1.0,
+    min_pixels: int = 4,
+) -> TerrainCandidatesSummary:
+    _validate_candidate_parameters(relief_threshold, min_pixels)
+
+    project_root = Path(terrain_derivatives_summary.project_root).expanduser().resolve()
+    candidates_root = (
+        _default_candidates_root(project_root)
+        if output_root is None
+        else Path(output_root).expanduser().resolve()
+    )
+    summary_path = candidates_root / "terrain_candidates_summary.json"
+
+    vector_records: list[CandidateVectorArtifactRecord] = []
+    candidate_records: list[TerrainCandidateRecord] = []
+    grouped_records = _group_derivative_records(terrain_derivatives_summary)
+
+    for (
+        aoi_id,
+        split,
+        terrain_source_id,
+        source_raster_stem,
+    ), derivatives in grouped_records.items():
+        local_relief_record = derivatives.get("local_relief")
+        slope_record = derivatives.get("slope")
+        if local_relief_record is None:
+            raise TerrainCandidatesError(
+                "Missing required local_relief derivative for "
+                f"group aoi_id={aoi_id}, terrain_source_id={terrain_source_id}, "
+                f"source_raster_stem={source_raster_stem}."
+            )
+        if slope_record is None:
+            raise TerrainCandidatesError(
+                "Missing required slope derivative for "
+                f"group aoi_id={aoi_id}, terrain_source_id={terrain_source_id}, "
+                f"source_raster_stem={source_raster_stem}."
+            )
+
+        local_relief_path = Path(local_relief_record.output_raster_path).expanduser().resolve()
+        slope_path = Path(slope_record.output_raster_path).expanduser().resolve()
+        if not local_relief_path.exists():
+            raise TerrainCandidatesError(
+                f"Derivative raster not found: {local_relief_path}"
+            )
+        if not slope_path.exists():
+            raise TerrainCandidatesError(f"Derivative raster not found: {slope_path}")
+
+        candidate_vector_path = (
+            candidates_root
+            / "candidates"
+            / aoi_id
+            / terrain_source_id
+            / f"{source_raster_stem}__candidates.geojson"
+        )
+
+        try:
+            with rasterio.open(local_relief_path) as relief_src:
+                with rasterio.open(slope_path) as slope_src:
+                    _ensure_matching_raster_grids(
+                        relief_src,
+                        slope_src,
+                        reference_label=str(local_relief_path),
+                        candidate_label=str(slope_path),
+                    )
+
+                    relief = relief_src.read(1).astype(np.float32)
+                    slope = slope_src.read(1).astype(np.float32)
+                    relief_nodata_mask = _build_nodata_mask(
+                        relief, cast(float | int | str | None, relief_src.nodata)
+                    )
+                    slope_nodata_mask = _build_nodata_mask(
+                        slope, cast(float | int | str | None, slope_src.nodata)
+                    )
+                    valid_mask = ~relief_nodata_mask & ~slope_nodata_mask
+                    candidate_mask = valid_mask & (relief >= np.float32(relief_threshold))
+
+                    structure = np.ones((3, 3), dtype=np.int8)
+                    labeled_components, component_count = cast(
+                        tuple[np.ndarray, int],
+                        label(candidate_mask, structure=structure),
+                    )
+
+                    retained_labels: list[int] = []
+                    for component_id in range(1, int(component_count) + 1):
+                        pixel_count = int(np.count_nonzero(labeled_components == component_id))
+                        if pixel_count >= min_pixels:
+                            retained_labels.append(component_id)
+
+                    retained_component_set = set(retained_labels)
+                    filtered_labels = np.where(
+                        np.isin(labeled_components, retained_labels),
+                        labeled_components,
+                        0,
+                    ).astype(np.int32)
+                    component_geometries = _component_geometries(
+                        filtered_labels, relief_src.transform
+                    )
+
+                    gdf = _empty_candidate_gdf(relief_src.crs)
+                    for ordinal, component_id in enumerate(
+                        sorted(retained_component_set), start=1
+                    ):
+                        component_mask = filtered_labels == component_id
+                        geometry = component_geometries.get(component_id)
+                        if geometry is None or geometry.is_empty:
+                            continue
+
+                        relief_values = relief[component_mask]
+                        slope_values = slope[component_mask]
+                        minx, miny, maxx, maxy = geometry.bounds
+                        bbox_width = float(maxx - minx)
+                        bbox_height = float(maxy - miny)
+                        bbox_aspect_ratio = (
+                            float(bbox_width / bbox_height) if bbox_height > 0.0 else 0.0
+                        )
+                        candidate_record = TerrainCandidateRecord(
+                            candidate_id=f"{source_raster_stem}__cand_{ordinal:04d}",
+                            aoi_id=aoi_id,
+                            split=split,
+                            terrain_source_id=terrain_source_id,
+                            source_raster_stem=source_raster_stem,
+                            output_vector_path=str(candidate_vector_path),
+                            pixel_count=int(component_mask.sum()),
+                            area_map_units=float(geometry.area),
+                            bbox_width=bbox_width,
+                            bbox_height=bbox_height,
+                            bbox_aspect_ratio=bbox_aspect_ratio,
+                            mean_local_relief=float(np.mean(relief_values)),
+                            max_local_relief=float(np.max(relief_values)),
+                            mean_slope=float(np.mean(slope_values)),
+                            max_slope=float(np.max(slope_values)),
+                        )
+                        candidate_records.append(candidate_record)
+                        gdf.loc[len(gdf)] = {
+                            **candidate_record.model_dump(exclude={"output_vector_path"}),
+                            "geometry": geometry,
+                        }
+
+                    _write_candidate_vector(gdf, candidate_vector_path)
+        except RasterioError as exc:
+            raise TerrainCandidatesError(
+                f"Candidate generation failed for {local_relief_path}: {exc}"
+            ) from exc
+
+        vector_records.append(
+            CandidateVectorArtifactRecord(
+                aoi_id=aoi_id,
+                split=split,
+                terrain_source_id=terrain_source_id,
+                source_raster_stem=source_raster_stem,
+                input_raster_path=str(
+                    Path(local_relief_record.input_raster_path).expanduser().resolve()
+                ),
+                candidate_vector_path=str(candidate_vector_path),
+                candidate_count=sum(
+                    1
+                    for record in candidate_records
+                    if record.output_vector_path == str(candidate_vector_path)
+                ),
+            )
+        )
+
+    return TerrainCandidatesSummary(
+        project_name=terrain_derivatives_summary.project_name,
+        project_root=str(project_root),
+        terrain_derivatives_artifact="",
+        output_root=str(candidates_root),
+        output_summary_path=str(summary_path),
+        total_input_groups_processed=len(grouped_records),
+        total_candidate_vectors_written=len(vector_records),
+        total_candidates=len(candidate_records),
+        relief_threshold=relief_threshold,
+        min_pixels=min_pixels,
+        vectors=vector_records,
+        records=candidate_records,
+    )
+
+
+def write_terrain_candidates_summary(
+    summary: TerrainCandidatesSummary, output_path: str | Path
 ) -> Path:
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)

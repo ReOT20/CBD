@@ -13,14 +13,18 @@ from cbd import __version__
 from cbd.data.aois import normalize_aoi
 from cbd.data.labels import normalize_labels
 from cbd.data.terrain import (
+    TerrainCandidatesError,
     TerrainDerivativesError,
     TerrainPreprocessingError,
     TerrainResolutionError,
     derive_terrain_features,
+    generate_terrain_candidates,
+    load_terrain_derivatives_summary,
     load_terrain_preprocessing_summary,
     load_terrain_resolution_summary,
     preprocess_terrain_inputs,
     resolve_terrain_inputs,
+    write_terrain_candidates_summary,
     write_terrain_derivatives_summary,
     write_terrain_preprocessing_summary,
     write_terrain_resolution_summary,
@@ -356,6 +360,85 @@ def derive_terrain_features_command(
 
     console.print(table)
     console.print("[green]Terrain derivatives completed successfully.[/green]")
+
+
+@app.command("generate-terrain-candidates")
+def generate_terrain_candidates_command(
+    terrain_derivatives_path: Annotated[
+        Path,
+        typer.Argument(help="Path to terrain_derivatives_summary.json"),
+    ],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root",
+            help=(
+                "Optional candidate output root. Defaults to "
+                "outputs/interim/terrain under the project root."
+            ),
+        ),
+    ] = None,
+    relief_threshold: Annotated[
+        float,
+        typer.Option(
+            "--relief-threshold",
+            help="Minimum local relief value used to build candidate masks.",
+        ),
+    ] = 1.0,
+    min_pixels: Annotated[
+        int,
+        typer.Option(
+            "--min-pixels",
+            help="Minimum connected-component size in pixels.",
+        ),
+    ] = 4,
+) -> None:
+    try:
+        derivatives_summary = load_terrain_derivatives_summary(terrain_derivatives_path)
+        candidates_summary = generate_terrain_candidates(
+            derivatives_summary,
+            output_root=output_root,
+            relief_threshold=relief_threshold,
+            min_pixels=min_pixels,
+        )
+        candidates_summary = candidates_summary.model_copy(
+            update={
+                "terrain_derivatives_artifact": str(
+                    Path(terrain_derivatives_path).expanduser().resolve()
+                )
+            }
+        )
+        out = write_terrain_candidates_summary(
+            candidates_summary,
+            candidates_summary.output_summary_path,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except TerrainCandidatesError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=3) from exc
+    except ValidationError as exc:
+        console.print("[red]Terrain candidates artifact validation failed.[/red]")
+        console.print(format_validation_error(exc))
+        raise typer.Exit(code=4) from exc
+
+    table = Table(title="Terrain candidate summary")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("Project", candidates_summary.project_name)
+    table.add_row("Input groups", str(candidates_summary.total_input_groups_processed))
+    table.add_row(
+        "Candidate vectors",
+        str(candidates_summary.total_candidate_vectors_written),
+    )
+    table.add_row("Candidates", str(candidates_summary.total_candidates))
+    table.add_row("Relief threshold", str(candidates_summary.relief_threshold))
+    table.add_row("Min pixels", str(candidates_summary.min_pixels))
+    table.add_row("Artifact", str(out))
+
+    console.print(table)
+    console.print("[green]Terrain candidate generation completed successfully.[/green]")
 
 
 if __name__ == "__main__":
