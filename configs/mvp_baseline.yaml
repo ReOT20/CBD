@@ -1,0 +1,17 @@
+run:
+  name: mvp_baseline
+  random_seed: 42
+
+paths:
+  data_manifest: ../manifests/data_manifest.yaml
+  aoi_manifest: ../manifests/aoi_manifest.yaml
+  outputs_root: ../outputs
+
+pipeline:
+  enable_wetlands_context: true
+  export_debug_artifacts: true
+  geometry_holdout: true
+
+notes:
+  - Open-data only baseline.
+  - Do not add commercial imagery to default workflow.
