@@ -8,7 +8,9 @@ This repository contains the executable implementation state for:
 - label ingestion
 - AOI ingestion
 - manifest validation
-- future DEM-first candidate generation pipeline
+- DEM-first terrain preprocessing and derivatives
+- terrain-driven candidate generation
+- review artifact export
 
 ## Method summary
 
@@ -27,12 +29,13 @@ Implemented:
 - label normalization
 - AOI normalization
 - DEM / LiDAR input resolution
+- DEM preprocessing
+- morphometric derivative generation
+- terrain-driven candidate generation
+- review artifact export
 - smoke tests
 
 Planned next:
-- DEM preprocessing
-- morphometric derivatives
-- terrain-driven candidate generation
 - evaluation and export
 
 ## Development checks

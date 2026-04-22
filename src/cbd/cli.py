@@ -17,17 +17,21 @@ from cbd.data.terrain import (
     TerrainDerivativesError,
     TerrainPreprocessingError,
     TerrainResolutionError,
+    TerrainReviewError,
     derive_terrain_features,
     generate_terrain_candidates,
+    load_terrain_candidates_summary,
     load_terrain_derivatives_summary,
     load_terrain_preprocessing_summary,
     load_terrain_resolution_summary,
+    prepare_terrain_review_artifacts,
     preprocess_terrain_inputs,
     resolve_terrain_inputs,
     write_terrain_candidates_summary,
     write_terrain_derivatives_summary,
     write_terrain_preprocessing_summary,
     write_terrain_resolution_summary,
+    write_terrain_review_summary,
 )
 from cbd.logging_utils import configure_logging
 from cbd.manifests import (
@@ -439,6 +443,64 @@ def generate_terrain_candidates_command(
 
     console.print(table)
     console.print("[green]Terrain candidate generation completed successfully.[/green]")
+
+
+@app.command("prepare-terrain-review")
+def prepare_terrain_review_command(
+    terrain_candidates_path: Annotated[
+        Path,
+        typer.Argument(help="Path to terrain_candidates_summary.json"),
+    ],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root",
+            help=(
+                "Optional review artifact output root. Defaults to "
+                "outputs/interim/terrain under the project root."
+            ),
+        ),
+    ] = None,
+) -> None:
+    try:
+        candidates_summary = load_terrain_candidates_summary(terrain_candidates_path)
+        review_summary = prepare_terrain_review_artifacts(
+            candidates_summary,
+            output_root=output_root,
+        )
+        review_summary = review_summary.model_copy(
+            update={
+                "terrain_candidates_artifact": str(
+                    Path(terrain_candidates_path).expanduser().resolve()
+                )
+            }
+        )
+        out = write_terrain_review_summary(
+            review_summary,
+            review_summary.output_summary_path,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except TerrainReviewError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=3) from exc
+    except ValidationError as exc:
+        console.print("[red]Terrain review artifact validation failed.[/red]")
+        console.print(format_validation_error(exc))
+        raise typer.Exit(code=4) from exc
+
+    table = Table(title="Terrain review artifact summary")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("Project", review_summary.project_name)
+    table.add_row("Candidate rows", str(review_summary.total_candidate_rows))
+    table.add_row("Review tables", str(review_summary.total_review_tables_written))
+    table.add_row("Review overlays", str(review_summary.total_review_overlays_written))
+    table.add_row("Artifact", str(out))
+
+    console.print(table)
+    console.print("[green]Terrain review artifact preparation completed successfully.[/green]")
 
 
 if __name__ == "__main__":

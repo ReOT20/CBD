@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import rasterio
 from pydantic import BaseModel, Field
 from rasterio import DatasetReader
@@ -43,6 +45,10 @@ class TerrainDerivativesError(ValueError):
 
 
 class TerrainCandidatesError(ValueError):
+    pass
+
+
+class TerrainReviewError(ValueError):
     pass
 
 
@@ -185,6 +191,36 @@ class TerrainCandidatesSummary(BaseModel):
     min_pixels: int
     vectors: list[CandidateVectorArtifactRecord]
     records: list[TerrainCandidateRecord]
+
+
+class ReviewTableArtifactRecord(BaseModel):
+    aoi_id: str
+    split: str
+    terrain_source_id: str
+    source_raster_stem: str | None = None
+    row_count: int
+    output_table_path: str
+
+
+class ReviewOverlayArtifactRecord(BaseModel):
+    aoi_id: str
+    split: str
+    terrain_source_id: str
+    candidate_count: int
+    output_vector_path: str
+
+
+class TerrainReviewSummary(BaseModel):
+    project_name: str
+    project_root: str
+    terrain_candidates_artifact: str
+    output_root: str
+    output_summary_path: str
+    total_candidate_rows: int
+    total_review_tables_written: int
+    total_review_overlays_written: int
+    tables: list[ReviewTableArtifactRecord]
+    overlays: list[ReviewOverlayArtifactRecord]
 
 
 DERIVATIVE_OUTPUT_NODATA = -9999.0
@@ -404,6 +440,20 @@ def load_terrain_derivatives_summary(path: str | Path) -> TerrainDerivativesSumm
         ) from exc
 
 
+def load_terrain_candidates_summary(path: str | Path) -> TerrainCandidatesSummary:
+    artifact_path = Path(path).expanduser().resolve()
+    if not artifact_path.exists():
+        raise FileNotFoundError(f"Terrain candidates artifact not found: {artifact_path}")
+    try:
+        return TerrainCandidatesSummary.model_validate_json(
+            artifact_path.read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise TerrainReviewError(
+            f"Failed to parse terrain candidates artifact: {artifact_path}"
+        ) from exc
+
+
 def _load_clip_geometry(geometry_path: str | Path) -> tuple[BaseGeometry, str]:
     gdf = read_vector(geometry_path)
     gdf = clean_geometries(gdf)
@@ -435,6 +485,10 @@ def _default_preprocess_root(project_root: str | Path) -> Path:
 
 
 def _default_candidates_root(project_root: str | Path) -> Path:
+    return Path(project_root).expanduser().resolve() / "outputs" / "interim" / "terrain"
+
+
+def _default_review_root(project_root: str | Path) -> Path:
     return Path(project_root).expanduser().resolve() / "outputs" / "interim" / "terrain"
 
 
@@ -896,6 +950,19 @@ def _write_candidate_vector(gdf: gpd.GeoDataFrame, output_path: Path) -> None:
     gdf.to_file(output_path, driver="GeoJSON")
 
 
+def _write_review_table(
+    rows: list[dict[str, object]],
+    output_path: Path,
+    *,
+    fieldnames: list[str],
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def generate_terrain_candidates(
     terrain_derivatives_summary: TerrainDerivativesSummary,
     *,
@@ -1081,6 +1148,186 @@ def generate_terrain_candidates(
 def write_terrain_candidates_summary(
     summary: TerrainCandidatesSummary, output_path: str | Path
 ) -> Path:
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+    return path
+
+
+def prepare_terrain_review_artifacts(
+    terrain_candidates_summary: TerrainCandidatesSummary,
+    *,
+    output_root: str | Path | None = None,
+) -> TerrainReviewSummary:
+    project_root = Path(terrain_candidates_summary.project_root).expanduser().resolve()
+    review_root = (
+        _default_review_root(project_root)
+        if output_root is None
+        else Path(output_root).expanduser().resolve()
+    )
+    summary_path = review_root / "terrain_review_summary.json"
+    artifacts_root = review_root / "review"
+
+    candidate_rows = [
+        {
+            "candidate_id": record.candidate_id,
+            "aoi_id": record.aoi_id,
+            "split": record.split,
+            "terrain_source_id": record.terrain_source_id,
+            "source_raster_stem": record.source_raster_stem,
+            "output_vector_path": record.output_vector_path,
+            "pixel_count": record.pixel_count,
+            "area_map_units": record.area_map_units,
+            "bbox_width": record.bbox_width,
+            "bbox_height": record.bbox_height,
+            "bbox_aspect_ratio": record.bbox_aspect_ratio,
+            "mean_local_relief": record.mean_local_relief,
+            "max_local_relief": record.max_local_relief,
+            "mean_slope": record.mean_slope,
+            "max_slope": record.max_slope,
+        }
+        for record in sorted(
+            terrain_candidates_summary.records,
+            key=lambda record: (
+                -record.max_local_relief,
+                -record.mean_local_relief,
+                -record.pixel_count,
+                record.candidate_id,
+            ),
+        )
+    ]
+    fieldnames = [
+        "candidate_id",
+        "aoi_id",
+        "split",
+        "terrain_source_id",
+        "source_raster_stem",
+        "output_vector_path",
+        "pixel_count",
+        "area_map_units",
+        "bbox_width",
+        "bbox_height",
+        "bbox_aspect_ratio",
+        "mean_local_relief",
+        "max_local_relief",
+        "mean_slope",
+        "max_slope",
+    ]
+
+    table_records: list[ReviewTableArtifactRecord] = []
+    overlay_records: list[ReviewOverlayArtifactRecord] = []
+
+    overall_table_path = artifacts_root / "terrain_candidate_review_table.csv"
+    _write_review_table(candidate_rows, overall_table_path, fieldnames=fieldnames)
+    table_records.append(
+        ReviewTableArtifactRecord(
+            aoi_id="all",
+            split="all",
+            terrain_source_id="all",
+            source_raster_stem=None,
+            row_count=len(candidate_rows),
+            output_table_path=str(overall_table_path),
+        )
+    )
+
+    rows_by_raster: dict[tuple[str, str, str, str], list[dict[str, object]]] = {}
+    for row in candidate_rows:
+        group_key = (
+            cast(str, row["aoi_id"]),
+            cast(str, row["split"]),
+            cast(str, row["terrain_source_id"]),
+            cast(str, row["source_raster_stem"]),
+        )
+        rows_by_raster.setdefault(group_key, []).append(row)
+
+    for (aoi_id, split, terrain_source_id, source_raster_stem), rows in rows_by_raster.items():
+        table_path = (
+            artifacts_root
+            / split
+            / aoi_id
+            / terrain_source_id
+            / f"{source_raster_stem}__review_table.csv"
+        )
+        _write_review_table(rows, table_path, fieldnames=fieldnames)
+        table_records.append(
+            ReviewTableArtifactRecord(
+                aoi_id=aoi_id,
+                split=split,
+                terrain_source_id=terrain_source_id,
+                source_raster_stem=source_raster_stem,
+                row_count=len(rows),
+                output_table_path=str(table_path),
+            )
+        )
+
+    vectors_by_group: dict[tuple[str, str, str], list[CandidateVectorArtifactRecord]] = {}
+    for vector_record in terrain_candidates_summary.vectors:
+        group_key = (
+            vector_record.aoi_id,
+            vector_record.split,
+            vector_record.terrain_source_id,
+        )
+        vectors_by_group.setdefault(group_key, []).append(vector_record)
+
+    for (aoi_id, split, terrain_source_id), vector_records in vectors_by_group.items():
+        frames: list[gpd.GeoDataFrame] = []
+        total_candidates = 0
+        overlay_path = (
+            artifacts_root
+            / split
+            / aoi_id
+            / terrain_source_id
+            / "terrain_candidate_review_overlay.geojson"
+        )
+        for vector_record in vector_records:
+            candidate_vector_path = Path(vector_record.candidate_vector_path).expanduser().resolve()
+            if not candidate_vector_path.exists():
+                raise TerrainReviewError(
+                    f"Candidate vector path not found for review: {candidate_vector_path}"
+                )
+            try:
+                gdf = gpd.read_file(candidate_vector_path)
+            except Exception as exc:
+                raise TerrainReviewError(
+                    f"Candidate vector could not be read for review: {candidate_vector_path}"
+                ) from exc
+            frames.append(gdf)
+            total_candidates += len(gdf)
+
+        if frames:
+            merged = gpd.GeoDataFrame(
+                pd.concat(frames, ignore_index=True),
+                geometry="geometry",
+                crs=frames[0].crs,
+            )
+        else:
+            merged = _empty_candidate_gdf(None)
+        _write_candidate_vector(merged, overlay_path)
+        overlay_records.append(
+            ReviewOverlayArtifactRecord(
+                aoi_id=aoi_id,
+                split=split,
+                terrain_source_id=terrain_source_id,
+                candidate_count=total_candidates,
+                output_vector_path=str(overlay_path),
+            )
+        )
+
+    return TerrainReviewSummary(
+        project_name=terrain_candidates_summary.project_name,
+        project_root=str(project_root),
+        terrain_candidates_artifact="",
+        output_root=str(review_root),
+        output_summary_path=str(summary_path),
+        total_candidate_rows=len(candidate_rows),
+        total_review_tables_written=len(table_records),
+        total_review_overlays_written=len(overlay_records),
+        tables=table_records,
+        overlays=overlay_records,
+    )
+
+
+def write_terrain_review_summary(summary: TerrainReviewSummary, output_path: str | Path) -> Path:
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
