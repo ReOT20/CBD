@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from pydantic import ValidationError
@@ -11,6 +12,11 @@ from rich.table import Table
 from cbd import __version__
 from cbd.data.aois import normalize_aoi
 from cbd.data.labels import normalize_labels
+from cbd.data.terrain import (
+    TerrainResolutionError,
+    resolve_terrain_inputs,
+    write_terrain_resolution_summary,
+)
 from cbd.logging_utils import configure_logging
 from cbd.manifests import (
     format_validation_error,
@@ -42,8 +48,8 @@ def health() -> None:
 
 @app.command("validate-manifests")
 def validate_manifests(
-    data_manifest_path: Path = typer.Argument(..., help="Path to data_manifest.yaml"),
-    aoi_manifest_path: Path = typer.Argument(..., help="Path to aoi_manifest.yaml"),
+    data_manifest_path: Annotated[Path, typer.Argument(help="Path to data_manifest.yaml")],
+    aoi_manifest_path: Annotated[Path, typer.Argument(help="Path to aoi_manifest.yaml")],
 ) -> None:
     try:
         data_manifest = load_data_manifest(data_manifest_path)
@@ -78,11 +84,11 @@ def validate_manifests(
 
 @app.command("normalize-labels")
 def normalize_labels_command(
-    input_path: Path = typer.Argument(..., help="Input vector file"),
-    output_path: Path = typer.Argument(..., help="Output normalized file"),
-    target_crs: str = typer.Option("EPSG:4326", help="Target CRS"),
-    source_id: str = typer.Option("carolina_bays_labels", help="Source identifier"),
-    split: str = typer.Option("train", help="Split name"),
+    input_path: Annotated[Path, typer.Argument(help="Input vector file")],
+    output_path: Annotated[Path, typer.Argument(help="Output normalized file")],
+    target_crs: Annotated[str, typer.Option(help="Target CRS")] = "EPSG:4326",
+    source_id: Annotated[str, typer.Option(help="Source identifier")] = "carolina_bays_labels",
+    split: Annotated[str, typer.Option(help="Split name")] = "train",
 ) -> None:
     try:
         out = normalize_labels(
@@ -104,11 +110,11 @@ def normalize_labels_command(
 
 @app.command("normalize-aoi")
 def normalize_aoi_command(
-    input_path: Path = typer.Argument(..., help="Input AOI vector file"),
-    output_path: Path = typer.Argument(..., help="Output normalized AOI file"),
-    target_crs: str = typer.Option("EPSG:4326", help="Target CRS"),
-    aoi_id: str = typer.Option("aoi", help="AOI identifier prefix"),
-    split: str = typer.Option("train", help="Split name"),
+    input_path: Annotated[Path, typer.Argument(help="Input AOI vector file")],
+    output_path: Annotated[Path, typer.Argument(help="Output normalized AOI file")],
+    target_crs: Annotated[str, typer.Option(help="Target CRS")] = "EPSG:4326",
+    aoi_id: Annotated[str, typer.Option(help="AOI identifier prefix")] = "aoi",
+    split: Annotated[str, typer.Option(help="Split name")] = "train",
 ) -> None:
     try:
         out = normalize_aoi(
@@ -126,6 +132,82 @@ def normalize_aoi_command(
         raise typer.Exit(code=3) from exc
 
     console.print(f"[green]Normalized AOI written to {out}[/green]")
+
+
+@app.command("resolve-terrain-inputs")
+def resolve_terrain_inputs_command(
+    data_manifest_path: Annotated[Path, typer.Argument(help="Path to data_manifest.yaml")],
+    aoi_manifest_path: Annotated[Path, typer.Argument(help="Path to aoi_manifest.yaml")],
+    project_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--project-root",
+            help="Project root used to resolve manifest-relative local paths.",
+        ),
+    ] = None,
+    output_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-path",
+            help=(
+                "Output JSON artifact path. Defaults to "
+                "outputs/interim/terrain/terrain_input_resolution.json under the project root."
+            ),
+        ),
+    ] = None,
+) -> None:
+    try:
+        data_manifest = load_data_manifest(data_manifest_path)
+        aoi_manifest = load_aoi_manifest(aoi_manifest_path)
+        summary = resolve_terrain_inputs(
+            data_manifest,
+            aoi_manifest,
+            data_manifest_path=data_manifest_path,
+            aoi_manifest_path=aoi_manifest_path,
+            project_root=project_root,
+        )
+        artifact_path = output_path
+        if artifact_path is None:
+            artifact_path = (
+                Path(summary.project_root)
+                / "outputs"
+                / "interim"
+                / "terrain"
+                / "terrain_input_resolution.json"
+            )
+        out = write_terrain_resolution_summary(summary, artifact_path)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except ValidationError as exc:
+        console.print("[red]Manifest validation failed.[/red]")
+        console.print(format_validation_error(exc))
+        raise typer.Exit(code=3) from exc
+    except TerrainResolutionError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=4) from exc
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=5) from exc
+
+    table = Table(title="Terrain input resolution summary")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("Project", summary.project_name)
+    table.add_row("Enabled AOIs", str(summary.enabled_aoi_count))
+    table.add_row("Terrain sources", str(summary.enabled_terrain_source_count))
+    table.add_row(
+        "Source IDs",
+        ", ".join(source.id for source in summary.terrain_sources),
+    )
+    table.add_row(
+        "Raster counts",
+        ", ".join(f"{source.id}={source.raster_count}" for source in summary.terrain_sources),
+    )
+    table.add_row("Artifact", str(out))
+
+    console.print(table)
+    console.print("[green]Terrain inputs resolved successfully.[/green]")
 
 
 if __name__ == "__main__":

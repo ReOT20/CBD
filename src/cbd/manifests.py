@@ -52,6 +52,13 @@ class AoiManifest(BaseModel):
     rules: dict[str, Any] = Field(default_factory=dict)
 
 
+SUPPORTED_TERRAIN_SOURCE_IDS = {
+    "nc_dem_10m_opentopography",
+    "nc_lidar_1m_validation",
+    "copernicus_dem_30m_fallback",
+}
+
+
 def load_yaml(path: str | Path) -> dict[str, Any]:
     file_path = Path(path)
     if not file_path.exists():
@@ -97,3 +104,32 @@ def summarize_aoi_manifest(manifest: AoiManifest) -> dict[str, Any]:
 
 def format_validation_error(exc: ValidationError) -> str:
     return exc.json(indent=2)
+
+
+def get_enabled_aois(manifest: AoiManifest) -> list[AoiRecord]:
+    return [aoi for aoi in manifest.aoi_sets if aoi.enabled]
+
+
+def get_enabled_terrain_sources(manifest: DataManifest) -> list[DataSource]:
+    return [
+        source
+        for source in manifest.sources
+        if source.enabled and source.id in SUPPORTED_TERRAIN_SOURCE_IDS
+    ]
+
+
+def validate_supported_terrain_sources(manifest: DataManifest) -> None:
+    unsupported_enabled_terrain = [
+        source.id
+        for source in manifest.sources
+        if source.enabled
+        and source.type == "raster_dem"
+        and source.id not in SUPPORTED_TERRAIN_SOURCE_IDS
+    ]
+    if unsupported_enabled_terrain:
+        supported = ", ".join(sorted(SUPPORTED_TERRAIN_SOURCE_IDS))
+        unsupported = ", ".join(sorted(unsupported_enabled_terrain))
+        raise ValueError(
+            f"Unsupported enabled terrain source(s): {unsupported}. "
+            f"Supported terrain sources for this stage: {supported}."
+        )

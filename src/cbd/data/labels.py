@@ -4,8 +4,12 @@ from pathlib import Path
 
 import geopandas as gpd
 
-from cbd.data.common import clean_geometries, ensure_crs, read_vector, write_vector
-
+from cbd.data.common import (
+    clean_geometries,
+    ensure_crs,
+    read_vector,
+    write_vector,
+)
 
 DEFAULT_LABEL_CLASS = "positive_complete"
 DEFAULT_REVIEW_STATUS = "seed"

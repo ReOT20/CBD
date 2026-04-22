@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import geopandas as gpd
 
@@ -19,10 +20,10 @@ def ensure_crs(gdf: gpd.GeoDataFrame, target_crs: str) -> gpd.GeoDataFrame:
 
 
 def clean_geometries(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    result = gdf[gdf.geometry.notnull()].copy()
-    result = result[result.is_valid].copy()
-    result = result[~result.geometry.is_empty].copy()
-    return result.reset_index(drop=True)
+    mask = gdf.geometry.notnull() & gdf.is_valid & ~gdf.geometry.is_empty
+    filtered = gdf.loc[mask].copy()
+    result = gpd.GeoDataFrame(filtered, geometry="geometry", crs=gdf.crs)
+    return cast(gpd.GeoDataFrame, result.reset_index(drop=True))
 
 
 def write_vector(gdf: gpd.GeoDataFrame, output_path: str | Path) -> Path:
