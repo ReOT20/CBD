@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
+import rasterio
 from pydantic import BaseModel, Field
+from rasterio.errors import RasterioError
+from rasterio.mask import mask
+from rasterio.transform import array_bounds
+from shapely.geometry import mapping
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
 
+from cbd.data.common import clean_geometries, read_vector
 from cbd.manifests import (
     SUPPORTED_TERRAIN_SOURCE_IDS,
     AoiManifest,
@@ -17,6 +26,10 @@ from cbd.manifests import (
 
 
 class TerrainResolutionError(ValueError):
+    pass
+
+
+class TerrainPreprocessingError(ValueError):
     pass
 
 
@@ -60,6 +73,36 @@ class TerrainResolutionSummary(BaseModel):
     aois: list[ResolvedAoi]
     terrain_sources: list[ResolvedTerrainSource]
     associations: list[AoiTerrainAssociation]
+
+
+class PreprocessedRasterRecord(BaseModel):
+    aoi_id: str
+    split: str
+    terrain_source_id: str
+    input_raster_path: str
+    output_raster_path: str | None = None
+    status: Literal["written", "skipped"]
+    skip_reason: str | None = None
+    source_crs: str
+    output_crs: str | None = None
+    width: int | None = None
+    height: int | None = None
+    count: int | None = None
+    dtype: str | None = None
+    nodata: float | None = None
+    bounds: list[float] | None = None
+
+
+class TerrainPreprocessingSummary(BaseModel):
+    project_name: str
+    project_root: str
+    terrain_resolution_artifact: str
+    output_root: str
+    output_summary_path: str
+    total_aois_processed: int
+    total_terrain_sources_processed: int
+    total_raster_outputs_written: int
+    records: list[PreprocessedRasterRecord]
 
 
 def infer_project_root(manifest_path: str | Path, project_root: str | Path | None = None) -> Path:
@@ -227,6 +270,198 @@ def resolve_terrain_inputs(
 
 def write_terrain_resolution_summary(
     summary: TerrainResolutionSummary, output_path: str | Path
+) -> Path:
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+    return path
+
+
+def load_terrain_resolution_summary(path: str | Path) -> TerrainResolutionSummary:
+    artifact_path = Path(path).expanduser().resolve()
+    if not artifact_path.exists():
+        raise FileNotFoundError(f"Terrain resolution artifact not found: {artifact_path}")
+    try:
+        return TerrainResolutionSummary.model_validate_json(
+            artifact_path.read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise TerrainPreprocessingError(
+            f"Failed to parse terrain resolution artifact: {artifact_path}"
+        ) from exc
+
+
+def _load_clip_geometry(geometry_path: str | Path) -> tuple[BaseGeometry, str]:
+    gdf = read_vector(geometry_path)
+    gdf = clean_geometries(gdf)
+    if gdf.empty:
+        raise TerrainPreprocessingError(
+            f"AOI geometry dataset is empty after cleaning: {geometry_path}"
+        )
+    if gdf.crs is None:
+        raise TerrainPreprocessingError(f"AOI geometry has no CRS: {geometry_path}")
+    geometry = unary_union(list(gdf.geometry))
+    if geometry.is_empty:
+        raise TerrainPreprocessingError(
+            f"AOI geometry is empty after union: {geometry_path}"
+        )
+    return cast(BaseGeometry, geometry), str(gdf.crs)
+
+
+def _coerce_nodata(value: float | int | str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _default_preprocess_root(project_root: str | Path) -> Path:
+    return Path(project_root).expanduser().resolve() / "outputs" / "interim" / "terrain"
+
+
+def preprocess_terrain_inputs(
+    terrain_resolution_summary: TerrainResolutionSummary,
+    *,
+    output_root: str | Path | None = None,
+) -> TerrainPreprocessingSummary:
+    project_root = Path(terrain_resolution_summary.project_root).expanduser().resolve()
+    preprocess_root = (
+        _default_preprocess_root(project_root)
+        if output_root is None
+        else Path(output_root).expanduser().resolve()
+    )
+    summary_path = preprocess_root / "terrain_preprocessing_summary.json"
+    raster_root = preprocess_root / "preprocessed"
+
+    records: list[PreprocessedRasterRecord] = []
+    written_count = 0
+
+    source_by_id = {source.id: source for source in terrain_resolution_summary.terrain_sources}
+    aoi_by_id = {aoi.id: aoi for aoi in terrain_resolution_summary.aois}
+
+    for association in terrain_resolution_summary.associations:
+        aoi = aoi_by_id.get(association.aoi_id)
+        source = source_by_id.get(association.terrain_source_id)
+        if aoi is None or source is None:
+            raise TerrainPreprocessingError(
+                "Terrain resolution artifact associations are inconsistent."
+            )
+
+        geometry_path = Path(aoi.geometry_path).expanduser().resolve()
+        if not geometry_path.exists():
+            raise TerrainPreprocessingError(
+                f"AOI geometry path not found during preprocessing for '{aoi.id}': {geometry_path}"
+            )
+        clip_geometry, aoi_crs = _load_clip_geometry(geometry_path)
+
+        for raster_path_str in source.raster_files:
+            raster_path = Path(raster_path_str).expanduser().resolve()
+            if not raster_path.exists():
+                raise TerrainPreprocessingError(
+                    f"Input raster path not found during preprocessing: {raster_path}"
+                )
+            try:
+                with rasterio.open(raster_path) as src:
+                    raster_crs = src.crs
+                    if raster_crs is None:
+                        raise TerrainPreprocessingError(
+                            f"Raster has no CRS: {raster_path}"
+                        )
+                    raster_crs_str = str(raster_crs)
+                    if raster_crs_str != aoi_crs:
+                        raise TerrainPreprocessingError(
+                            f"CRS mismatch for AOI '{aoi.id}' and raster '{raster_path}': "
+                            f"AOI={aoi_crs}, raster={raster_crs_str}"
+                        )
+
+                    try:
+                        clipped, transform = mask(
+                            src,
+                            [mapping(clip_geometry)],
+                            crop=True,
+                        )
+                    except ValueError:
+                        records.append(
+                            PreprocessedRasterRecord(
+                                aoi_id=aoi.id,
+                                split=aoi.split,
+                                terrain_source_id=source.id,
+                                input_raster_path=str(raster_path),
+                                status="skipped",
+                                skip_reason="no_intersection",
+                                source_crs=raster_crs_str,
+                            )
+                        )
+                        continue
+
+                    output_path = (
+                        raster_root / aoi.id / source.id / f"{raster_path.stem}.tif"
+                    )
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    profile = src.profile.copy()
+                    profile.update(
+                        {
+                            "driver": "GTiff",
+                            "height": int(clipped.shape[1]),
+                            "width": int(clipped.shape[2]),
+                            "transform": transform,
+                        }
+                    )
+
+                    with rasterio.open(output_path, "w", **profile) as dst:
+                        dst.write(clipped)
+
+                    bounds = array_bounds(
+                        int(clipped.shape[1]),
+                        int(clipped.shape[2]),
+                        transform,
+                    )
+                    bounds_list = [
+                        float(value)
+                        for value in cast(tuple[float, float, float, float], bounds)
+                    ]
+                    records.append(
+                        PreprocessedRasterRecord(
+                            aoi_id=aoi.id,
+                            split=aoi.split,
+                            terrain_source_id=source.id,
+                            input_raster_path=str(raster_path),
+                            output_raster_path=str(output_path),
+                            status="written",
+                            source_crs=raster_crs_str,
+                            output_crs=raster_crs_str,
+                            width=int(clipped.shape[2]),
+                            height=int(clipped.shape[1]),
+                            count=int(clipped.shape[0]),
+                            dtype=str(clipped.dtype),
+                            nodata=_coerce_nodata(cast(float | int | str | None, src.nodata)),
+                            bounds=bounds_list,
+                        )
+                    )
+                    written_count += 1
+            except RasterioError as exc:
+                raise TerrainPreprocessingError(
+                    f"Raster preprocessing failed for {raster_path}: {exc}"
+                ) from exc
+
+    return TerrainPreprocessingSummary(
+        project_name=terrain_resolution_summary.project_name,
+        project_root=str(project_root),
+        terrain_resolution_artifact="",
+        output_root=str(preprocess_root),
+        output_summary_path=str(summary_path),
+        total_aois_processed=len(terrain_resolution_summary.aois),
+        total_terrain_sources_processed=len(terrain_resolution_summary.terrain_sources),
+        total_raster_outputs_written=written_count,
+        records=records,
+    )
+
+
+def write_terrain_preprocessing_summary(
+    summary: TerrainPreprocessingSummary, output_path: str | Path
 ) -> Path:
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)

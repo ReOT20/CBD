@@ -13,8 +13,12 @@ from cbd import __version__
 from cbd.data.aois import normalize_aoi
 from cbd.data.labels import normalize_labels
 from cbd.data.terrain import (
+    TerrainPreprocessingError,
     TerrainResolutionError,
+    load_terrain_resolution_summary,
+    preprocess_terrain_inputs,
     resolve_terrain_inputs,
+    write_terrain_preprocessing_summary,
     write_terrain_resolution_summary,
 )
 from cbd.logging_utils import configure_logging
@@ -208,6 +212,71 @@ def resolve_terrain_inputs_command(
 
     console.print(table)
     console.print("[green]Terrain inputs resolved successfully.[/green]")
+
+
+@app.command("preprocess-terrain")
+def preprocess_terrain_command(
+    terrain_resolution_path: Annotated[
+        Path,
+        typer.Argument(help="Path to terrain_input_resolution.json"),
+    ],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root",
+            help=(
+                "Optional preprocessing output root. Defaults to "
+                "outputs/interim/terrain under the project root."
+            ),
+        ),
+    ] = None,
+) -> None:
+    try:
+        terrain_summary = load_terrain_resolution_summary(terrain_resolution_path)
+        preprocessing_summary = preprocess_terrain_inputs(
+            terrain_summary,
+            output_root=output_root,
+        )
+        preprocessing_summary = preprocessing_summary.model_copy(
+            update={
+                "terrain_resolution_artifact": str(
+                    Path(terrain_resolution_path).expanduser().resolve()
+                )
+            }
+        )
+        out = write_terrain_preprocessing_summary(
+            preprocessing_summary,
+            preprocessing_summary.output_summary_path,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except TerrainPreprocessingError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=3) from exc
+    except ValidationError as exc:
+        console.print("[red]Terrain preprocessing artifact validation failed.[/red]")
+        console.print(format_validation_error(exc))
+        raise typer.Exit(code=4) from exc
+
+    written = sum(1 for record in preprocessing_summary.records if record.status == "written")
+    skipped = sum(1 for record in preprocessing_summary.records if record.status == "skipped")
+
+    table = Table(title="Terrain preprocessing summary")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("Project", preprocessing_summary.project_name)
+    table.add_row("Enabled AOIs", str(preprocessing_summary.total_aois_processed))
+    table.add_row(
+        "Terrain sources",
+        str(preprocessing_summary.total_terrain_sources_processed),
+    )
+    table.add_row("Outputs written", str(written))
+    table.add_row("Pairs skipped", str(skipped))
+    table.add_row("Artifact", str(out))
+
+    console.print(table)
+    console.print("[green]Terrain preprocessing completed successfully.[/green]")
 
 
 if __name__ == "__main__":
