@@ -216,14 +216,38 @@ class TerrainReviewSummary(BaseModel):
     terrain_candidates_artifact: str
     output_root: str
     output_summary_path: str
+    curated_manifest_path: str
     total_candidate_rows: int
     total_review_tables_written: int
     total_review_overlays_written: int
+    total_curated_tables_written: int
     tables: list[ReviewTableArtifactRecord]
     overlays: list[ReviewOverlayArtifactRecord]
 
 
+class CuratedReviewArtifactRecord(BaseModel):
+    artifact_kind: Literal["top_candidates", "large_candidates", "small_candidates", "index"]
+    split: str
+    row_count: int
+    output_table_path: str
+    sort_policy: str
+
+
+class TerrainCuratedReviewManifest(BaseModel):
+    project_name: str
+    project_root: str
+    output_root: str
+    output_manifest_path: str
+    total_candidate_rows: int
+    total_curated_tables_written: int
+    artifacts: list[CuratedReviewArtifactRecord]
+
+
 DERIVATIVE_OUTPUT_NODATA = -9999.0
+CURATED_REVIEW_SORT_POLICY = (
+    "max_local_relief_desc__mean_local_relief_desc__pixel_count_desc__candidate_id_asc"
+)
+CURATED_REVIEW_LARGE_CANDIDATE_MIN_PIXELS = 16
 
 
 def infer_project_root(manifest_path: str | Path, project_root: str | Path | None = None) -> Path:
@@ -963,6 +987,49 @@ def _write_review_table(
         writer.writerows(rows)
 
 
+def _candidate_row_sort_key(row: dict[str, object]) -> tuple[float, float, int, str]:
+    return (
+        -cast(float, row["max_local_relief"]),
+        -cast(float, row["mean_local_relief"]),
+        -cast(int, row["pixel_count"]),
+        cast(str, row["candidate_id"]),
+    )
+
+
+def _curated_review_rows(
+    candidate_rows: list[dict[str, object]],
+    *,
+    split: str,
+) -> dict[str, list[dict[str, object]]]:
+    if split == "all":
+        split_rows = list(candidate_rows)
+    else:
+        split_rows = [row for row in candidate_rows if row["split"] == split]
+
+    sorted_rows = sorted(split_rows, key=_candidate_row_sort_key)
+    return {
+        "top_candidates": sorted_rows,
+        "large_candidates": [
+            row
+            for row in sorted_rows
+            if cast(int, row["pixel_count"]) >= CURATED_REVIEW_LARGE_CANDIDATE_MIN_PIXELS
+        ],
+        "small_candidates": [
+            row
+            for row in sorted_rows
+            if cast(int, row["pixel_count"]) < CURATED_REVIEW_LARGE_CANDIDATE_MIN_PIXELS
+        ],
+    }
+
+
+def _write_curated_review_manifest(
+    manifest: TerrainCuratedReviewManifest, output_path: Path
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    return output_path
+
+
 def generate_terrain_candidates(
     terrain_derivatives_summary: TerrainDerivativesSummary,
     *,
@@ -1166,6 +1233,7 @@ def prepare_terrain_review_artifacts(
         else Path(output_root).expanduser().resolve()
     )
     summary_path = review_root / "terrain_review_summary.json"
+    curated_manifest_path = review_root / "terrain_curated_review_manifest.json"
     artifacts_root = review_root / "review"
 
     candidate_rows = [
@@ -1216,6 +1284,7 @@ def prepare_terrain_review_artifacts(
 
     table_records: list[ReviewTableArtifactRecord] = []
     overlay_records: list[ReviewOverlayArtifactRecord] = []
+    curated_records: list[CuratedReviewArtifactRecord] = []
 
     overall_table_path = artifacts_root / "terrain_candidate_review_table.csv"
     _write_review_table(candidate_rows, overall_table_path, fieldnames=fieldnames)
@@ -1313,15 +1382,76 @@ def prepare_terrain_review_artifacts(
             )
         )
 
+    curated_root = artifacts_root / "curated"
+    splits = sorted({cast(str, row["split"]) for row in candidate_rows})
+    for split in ["all", *splits]:
+        curated_tables = _curated_review_rows(candidate_rows, split=split)
+        split_root = curated_root / split
+        index_rows: list[dict[str, object]] = []
+        for artifact_kind, rows in curated_tables.items():
+            output_table_path = split_root / f"{artifact_kind}.csv"
+            _write_review_table(rows, output_table_path, fieldnames=fieldnames)
+            curated_records.append(
+                CuratedReviewArtifactRecord(
+                    artifact_kind=cast(
+                        Literal["top_candidates", "large_candidates", "small_candidates"],
+                        artifact_kind,
+                    ),
+                    split=split,
+                    row_count=len(rows),
+                    output_table_path=str(output_table_path),
+                    sort_policy=CURATED_REVIEW_SORT_POLICY,
+                )
+            )
+            index_rows.append(
+                {
+                    "artifact_kind": artifact_kind,
+                    "row_count": len(rows),
+                    "output_table_path": str(output_table_path),
+                    "sort_policy": CURATED_REVIEW_SORT_POLICY,
+                }
+            )
+
+        index_path = split_root / "curated_index.csv"
+        _write_review_table(
+            index_rows,
+            index_path,
+            fieldnames=["artifact_kind", "row_count", "output_table_path", "sort_policy"],
+        )
+        curated_records.append(
+            CuratedReviewArtifactRecord(
+                artifact_kind="index",
+                split=split,
+                row_count=len(index_rows),
+                output_table_path=str(index_path),
+                sort_policy=CURATED_REVIEW_SORT_POLICY,
+            )
+        )
+
+    _write_curated_review_manifest(
+        TerrainCuratedReviewManifest(
+            project_name=terrain_candidates_summary.project_name,
+            project_root=str(project_root),
+            output_root=str(review_root),
+            output_manifest_path=str(curated_manifest_path),
+            total_candidate_rows=len(candidate_rows),
+            total_curated_tables_written=len(curated_records),
+            artifacts=curated_records,
+        ),
+        curated_manifest_path,
+    )
+
     return TerrainReviewSummary(
         project_name=terrain_candidates_summary.project_name,
         project_root=str(project_root),
         terrain_candidates_artifact="",
         output_root=str(review_root),
         output_summary_path=str(summary_path),
+        curated_manifest_path=str(curated_manifest_path),
         total_candidate_rows=len(candidate_rows),
         total_review_tables_written=len(table_records),
         total_review_overlays_written=len(overlay_records),
+        total_curated_tables_written=len(curated_records),
         tables=table_records,
         overlays=overlay_records,
     )

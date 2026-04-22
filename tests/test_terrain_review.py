@@ -21,6 +21,15 @@ def _candidate_record(
     terrain_source_id: str,
     source_raster_stem: str,
     output_vector_path: Path,
+    pixel_count: int = 4,
+    area_map_units: float = 4.0,
+    bbox_width: float = 2.0,
+    bbox_height: float = 2.0,
+    bbox_aspect_ratio: float = 1.0,
+    mean_local_relief: float = 1.55,
+    max_local_relief: float = 1.7,
+    mean_slope: float = 3.125,
+    max_slope: float = 3.5,
 ) -> dict[str, object]:
     return {
         "candidate_id": candidate_id,
@@ -29,15 +38,15 @@ def _candidate_record(
         "terrain_source_id": terrain_source_id,
         "source_raster_stem": source_raster_stem,
         "output_vector_path": str(output_vector_path.resolve()),
-        "pixel_count": 4,
-        "area_map_units": 4.0,
-        "bbox_width": 2.0,
-        "bbox_height": 2.0,
-        "bbox_aspect_ratio": 1.0,
-        "mean_local_relief": 1.55,
-        "max_local_relief": 1.7,
-        "mean_slope": 3.125,
-        "max_slope": 3.5,
+        "pixel_count": pixel_count,
+        "area_map_units": area_map_units,
+        "bbox_width": bbox_width,
+        "bbox_height": bbox_height,
+        "bbox_aspect_ratio": bbox_aspect_ratio,
+        "mean_local_relief": mean_local_relief,
+        "max_local_relief": max_local_relief,
+        "mean_slope": mean_slope,
+        "max_slope": max_slope,
     }
 
 
@@ -82,6 +91,15 @@ def _write_candidate_vector(
     terrain_source_id: str = "nc_dem_10m_opentopography",
     source_raster_stem: str = "tile_001",
     candidate_id: str = "tile_001__cand_0001",
+    pixel_count: int = 4,
+    area_map_units: float = 4.0,
+    bbox_width: float = 2.0,
+    bbox_height: float = 2.0,
+    bbox_aspect_ratio: float = 1.0,
+    mean_local_relief: float = 1.55,
+    max_local_relief: float = 1.7,
+    mean_slope: float = 3.125,
+    max_slope: float = 3.5,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if with_candidate:
@@ -92,15 +110,15 @@ def _write_candidate_vector(
                 "split": [split],
                 "terrain_source_id": [terrain_source_id],
                 "source_raster_stem": [source_raster_stem],
-                "pixel_count": [4],
-                "area_map_units": [4.0],
-                "bbox_width": [2.0],
-                "bbox_height": [2.0],
-                "bbox_aspect_ratio": [1.0],
-                "mean_local_relief": [1.55],
-                "max_local_relief": [1.7],
-                "mean_slope": [3.125],
-                "max_slope": [3.5],
+                "pixel_count": [pixel_count],
+                "area_map_units": [area_map_units],
+                "bbox_width": [bbox_width],
+                "bbox_height": [bbox_height],
+                "bbox_aspect_ratio": [bbox_aspect_ratio],
+                "mean_local_relief": [mean_local_relief],
+                "max_local_relief": [max_local_relief],
+                "mean_slope": [mean_slope],
+                "max_slope": [max_slope],
             },
             geometry=[Polygon([(1, 1), (3, 1), (3, 3), (1, 3)])],
             crs="EPSG:4326",
@@ -216,6 +234,9 @@ def test_prepare_terrain_review_success(tmp_path: Path) -> None:
     assert "Terrain review artifact preparation completed successfully" in result.stdout
 
     summary_path = tmp_path / "outputs" / "interim" / "terrain" / "terrain_review_summary.json"
+    curated_manifest_path = (
+        tmp_path / "outputs" / "interim" / "terrain" / "terrain_curated_review_manifest.json"
+    )
     overall_table_path = (
         tmp_path
         / "outputs"
@@ -246,21 +267,39 @@ def test_prepare_terrain_review_success(tmp_path: Path) -> None:
         / "nc_dem_10m_opentopography"
         / "terrain_candidate_review_overlay.geojson"
     )
+    curated_top_candidates_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "review"
+        / "curated"
+        / "train"
+        / "top_candidates.csv"
+    )
 
     assert summary_path.exists()
+    assert curated_manifest_path.exists()
     assert overall_table_path.exists()
     assert per_raster_table_path.exists()
     assert overlay_path.exists()
+    assert curated_top_candidates_path.exists()
 
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     assert payload["total_candidate_rows"] == 1
     assert payload["total_review_tables_written"] == 2
     assert payload["total_review_overlays_written"] == 1
+    assert payload["total_curated_tables_written"] == 8
+    assert payload["curated_manifest_path"] == str(curated_manifest_path)
 
     with overall_table_path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == "tile_001__cand_0001"
+
+    curated_manifest = json.loads(curated_manifest_path.read_text(encoding="utf-8"))
+    assert curated_manifest["total_candidate_rows"] == 1
+    assert curated_manifest["total_curated_tables_written"] == 8
 
     overlay_gdf = gpd.read_file(overlay_path)
     assert len(overlay_gdf) == 1
@@ -307,6 +346,16 @@ def test_prepare_terrain_review_empty_candidates(tmp_path: Path) -> None:
         / "review"
         / "terrain_candidate_review_table.csv"
     )
+    curated_top_candidates_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "review"
+        / "curated"
+        / "all"
+        / "top_candidates.csv"
+    )
     overlay_path = (
         tmp_path
         / "outputs"
@@ -323,10 +372,14 @@ def test_prepare_terrain_review_empty_candidates(tmp_path: Path) -> None:
     assert payload["total_candidate_rows"] == 0
     assert payload["total_review_tables_written"] == 1
     assert payload["total_review_overlays_written"] == 1
+    assert payload["total_curated_tables_written"] == 4
 
     with overall_table_path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert rows == []
+    with curated_top_candidates_path.open(encoding="utf-8", newline="") as handle:
+        curated_rows = list(csv.DictReader(handle))
+    assert curated_rows == []
 
     overlay_gdf = gpd.read_file(overlay_path)
     assert overlay_gdf.empty
@@ -477,6 +530,155 @@ def test_prepare_terrain_review_preserves_split_in_output_paths(tmp_path: Path) 
     }
     assert logical_table_paths == {str(train_table_path), str(val_table_path)}
     assert logical_overlay_paths == {str(train_overlay_path), str(val_overlay_path)}
+    assert payload["total_curated_tables_written"] == 12
+
+
+def test_prepare_terrain_review_writes_curated_sorted_groups(tmp_path: Path) -> None:
+    candidate_specs = [
+        {
+            "candidate_id": "tile_001__cand_high_small",
+            "source_raster_stem": "tile_001",
+            "pixel_count": 8,
+            "mean_local_relief": 2.8,
+            "max_local_relief": 3.5,
+        },
+        {
+            "candidate_id": "tile_002__cand_mid_large",
+            "source_raster_stem": "tile_002",
+            "pixel_count": 16,
+            "mean_local_relief": 1.8,
+            "max_local_relief": 2.4,
+        },
+        {
+            "candidate_id": "tile_003__cand_low_large",
+            "source_raster_stem": "tile_003",
+            "pixel_count": 20,
+            "mean_local_relief": 1.2,
+            "max_local_relief": 1.9,
+        },
+    ]
+
+    vectors: list[dict[str, object]] = []
+    records: list[dict[str, object]] = []
+    for spec in candidate_specs:
+        vector_path = (
+            tmp_path
+            / "outputs"
+            / "interim"
+            / "terrain"
+            / "candidates"
+            / "train_aoi_01"
+            / "nc_dem_10m_opentopography"
+            / f"{spec['source_raster_stem']}__candidates.geojson"
+        )
+        _write_candidate_vector(
+            vector_path,
+            with_candidate=True,
+            aoi_id="train_aoi_01",
+            split="train",
+            terrain_source_id="nc_dem_10m_opentopography",
+            source_raster_stem=str(spec["source_raster_stem"]),
+            candidate_id=str(spec["candidate_id"]),
+            pixel_count=int(spec["pixel_count"]),
+            mean_local_relief=float(spec["mean_local_relief"]),
+            max_local_relief=float(spec["max_local_relief"]),
+        )
+        vectors.append(
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                terrain_source_id="nc_dem_10m_opentopography",
+                source_raster_stem=str(spec["source_raster_stem"]),
+                candidate_vector_path=vector_path,
+                candidate_count=1,
+            )
+        )
+        records.append(
+            _candidate_record(
+                candidate_id=str(spec["candidate_id"]),
+                aoi_id="train_aoi_01",
+                split="train",
+                terrain_source_id="nc_dem_10m_opentopography",
+                source_raster_stem=str(spec["source_raster_stem"]),
+                output_vector_path=vector_path,
+                pixel_count=int(spec["pixel_count"]),
+                mean_local_relief=float(spec["mean_local_relief"]),
+                max_local_relief=float(spec["max_local_relief"]),
+            )
+        )
+
+    artifact_path = _write_candidates_artifact(tmp_path, vectors=vectors, records=records)
+
+    result = runner.invoke(app, ["prepare-terrain-review", str(artifact_path)])
+
+    assert result.exit_code == 0
+
+    top_candidates_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "review"
+        / "curated"
+        / "train"
+        / "top_candidates.csv"
+    )
+    large_candidates_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "review"
+        / "curated"
+        / "train"
+        / "large_candidates.csv"
+    )
+    small_candidates_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "review"
+        / "curated"
+        / "train"
+        / "small_candidates.csv"
+    )
+    index_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "review"
+        / "curated"
+        / "train"
+        / "curated_index.csv"
+    )
+
+    with top_candidates_path.open(encoding="utf-8", newline="") as handle:
+        top_rows = list(csv.DictReader(handle))
+    with large_candidates_path.open(encoding="utf-8", newline="") as handle:
+        large_rows = list(csv.DictReader(handle))
+    with small_candidates_path.open(encoding="utf-8", newline="") as handle:
+        small_rows = list(csv.DictReader(handle))
+    with index_path.open(encoding="utf-8", newline="") as handle:
+        index_rows = list(csv.DictReader(handle))
+
+    assert [row["candidate_id"] for row in top_rows] == [
+        "tile_001__cand_high_small",
+        "tile_002__cand_mid_large",
+        "tile_003__cand_low_large",
+    ]
+    assert [row["candidate_id"] for row in large_rows] == [
+        "tile_002__cand_mid_large",
+        "tile_003__cand_low_large",
+    ]
+    assert [row["candidate_id"] for row in small_rows] == ["tile_001__cand_high_small"]
+    assert {row["artifact_kind"] for row in index_rows} == {
+        "top_candidates",
+        "large_candidates",
+        "small_candidates",
+    }
 
 
 def test_prepare_terrain_review_fails_for_missing_artifact(tmp_path: Path) -> None:

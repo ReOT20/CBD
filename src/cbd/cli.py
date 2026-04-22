@@ -497,6 +497,8 @@ def prepare_terrain_review_command(
     table.add_row("Candidate rows", str(review_summary.total_candidate_rows))
     table.add_row("Review tables", str(review_summary.total_review_tables_written))
     table.add_row("Review overlays", str(review_summary.total_review_overlays_written))
+    table.add_row("Curated tables", str(review_summary.total_curated_tables_written))
+    table.add_row("Curated manifest", review_summary.curated_manifest_path)
     table.add_row("Artifact", str(out))
 
     console.print(table)
