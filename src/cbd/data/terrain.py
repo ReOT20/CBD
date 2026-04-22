@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
+import numpy as np
 import rasterio
 from pydantic import BaseModel, Field
 from rasterio.errors import RasterioError
 from rasterio.mask import mask
 from rasterio.transform import array_bounds
+from scipy.ndimage import generic_filter
 from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
@@ -30,6 +32,10 @@ class TerrainResolutionError(ValueError):
 
 
 class TerrainPreprocessingError(ValueError):
+    pass
+
+
+class TerrainDerivativesError(ValueError):
     pass
 
 
@@ -103,6 +109,35 @@ class TerrainPreprocessingSummary(BaseModel):
     total_terrain_sources_processed: int
     total_raster_outputs_written: int
     records: list[PreprocessedRasterRecord]
+
+
+class DerivedRasterRecord(BaseModel):
+    aoi_id: str
+    split: str
+    terrain_source_id: str
+    input_raster_path: str
+    derivative_name: Literal["slope", "local_relief"]
+    output_raster_path: str
+    width: int
+    height: int
+    dtype: str
+    nodata: float
+    relief_window_size: int | None = None
+
+
+class TerrainDerivativesSummary(BaseModel):
+    project_name: str
+    project_root: str
+    terrain_preprocessing_artifact: str
+    output_root: str
+    output_summary_path: str
+    total_input_rasters_processed: int
+    total_derivative_rasters_written: int
+    relief_window_size: int
+    records: list[DerivedRasterRecord]
+
+
+DERIVATIVE_OUTPUT_NODATA = -9999.0
 
 
 def infer_project_root(manifest_path: str | Path, project_root: str | Path | None = None) -> Path:
@@ -291,6 +326,20 @@ def load_terrain_resolution_summary(path: str | Path) -> TerrainResolutionSummar
         ) from exc
 
 
+def load_terrain_preprocessing_summary(path: str | Path) -> TerrainPreprocessingSummary:
+    artifact_path = Path(path).expanduser().resolve()
+    if not artifact_path.exists():
+        raise FileNotFoundError(f"Terrain preprocessing artifact not found: {artifact_path}")
+    try:
+        return TerrainPreprocessingSummary.model_validate_json(
+            artifact_path.read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise TerrainDerivativesError(
+            f"Failed to parse terrain preprocessing artifact: {artifact_path}"
+        ) from exc
+
+
 def _load_clip_geometry(geometry_path: str | Path) -> tuple[BaseGeometry, str]:
     gdf = read_vector(geometry_path)
     gdf = clean_geometries(gdf)
@@ -319,6 +368,102 @@ def _coerce_nodata(value: float | int | str | None) -> float | None:
 
 def _default_preprocess_root(project_root: str | Path) -> Path:
     return Path(project_root).expanduser().resolve() / "outputs" / "interim" / "terrain"
+
+
+def _validate_relief_window_size(relief_window_size: int) -> None:
+    if relief_window_size < 3 or relief_window_size % 2 == 0:
+        raise TerrainDerivativesError(
+            f"Relief window size must be an odd integer >= 3, got {relief_window_size}."
+        )
+
+
+def _nanmax_filter(window: np.ndarray) -> float:
+    if np.isnan(window).all():
+        return np.nan
+    return float(np.nanmax(window))
+
+
+def _nanmin_filter(window: np.ndarray) -> float:
+    if np.isnan(window).all():
+        return np.nan
+    return float(np.nanmin(window))
+
+
+def _build_nodata_mask(array: np.ndarray, nodata: float | int | str | None) -> np.ndarray:
+    if nodata is None:
+        return np.zeros(array.shape, dtype=bool)
+    if isinstance(nodata, str):
+        try:
+            nodata = float(nodata)
+        except ValueError:
+            return np.zeros(array.shape, dtype=bool)
+    nodata_float = float(nodata)
+    if np.isnan(nodata_float):
+        return np.isnan(array)
+    return np.isclose(array, nodata_float)
+
+
+def _compute_slope(
+    array: np.ndarray,
+    nodata_mask: np.ndarray,
+    *,
+    xres: float,
+    yres: float,
+) -> np.ndarray:
+    work = array.astype(np.float32, copy=True)
+    if nodata_mask.any():
+        valid = work[~nodata_mask]
+        fill_value = float(valid.mean()) if valid.size > 0 else 0.0
+        work[nodata_mask] = fill_value
+    grad_y, grad_x = np.gradient(work, yres, xres)
+    slope = np.sqrt((grad_x ** 2) + (grad_y ** 2)).astype(np.float32)
+    slope[nodata_mask] = np.float32(DERIVATIVE_OUTPUT_NODATA)
+    return slope
+
+
+def _compute_local_relief(
+    array: np.ndarray,
+    nodata_mask: np.ndarray,
+    *,
+    relief_window_size: int,
+) -> np.ndarray:
+    work = array.astype(np.float32, copy=True)
+    work[nodata_mask] = np.nan
+    local_max = generic_filter(
+        work,
+        _nanmax_filter,
+        size=relief_window_size,
+        mode="nearest",
+    )
+    local_min = generic_filter(
+        work,
+        _nanmin_filter,
+        size=relief_window_size,
+        mode="nearest",
+    )
+    relief = (local_max - local_min).astype(np.float32)
+    relief[np.isnan(relief)] = np.float32(DERIVATIVE_OUTPUT_NODATA)
+    relief[nodata_mask] = np.float32(DERIVATIVE_OUTPUT_NODATA)
+    return relief
+
+
+def _write_derivative_raster(
+    output_path: Path,
+    source_profile: dict[str, Any],
+    derivative_array: np.ndarray,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    profile = source_profile.copy()
+    profile.update(
+        {
+            "driver": "GTiff",
+            "count": 1,
+            "dtype": "float32",
+            "nodata": float(DERIVATIVE_OUTPUT_NODATA),
+        }
+    )
+    with rasterio.open(output_path, "w", **profile) as dst:
+        dst.write(derivative_array.astype(np.float32), 1)
 
 
 def preprocess_terrain_inputs(
@@ -462,6 +607,119 @@ def preprocess_terrain_inputs(
 
 def write_terrain_preprocessing_summary(
     summary: TerrainPreprocessingSummary, output_path: str | Path
+) -> Path:
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+    return path
+
+
+def derive_terrain_features(
+    terrain_preprocessing_summary: TerrainPreprocessingSummary,
+    *,
+    output_root: str | Path | None = None,
+    relief_window_size: int = 5,
+) -> TerrainDerivativesSummary:
+    _validate_relief_window_size(relief_window_size)
+
+    project_root = Path(terrain_preprocessing_summary.project_root).expanduser().resolve()
+    derivatives_root = (
+        _default_preprocess_root(project_root)
+        if output_root is None
+        else Path(output_root).expanduser().resolve()
+    )
+    output_summary_path = derivatives_root / "terrain_derivatives_summary.json"
+    raster_root = derivatives_root / "derivatives"
+
+    records: list[DerivedRasterRecord] = []
+    processed_inputs = 0
+
+    for record in terrain_preprocessing_summary.records:
+        if record.status != "written":
+            continue
+
+        input_raster_path = Path(record.output_raster_path or "").expanduser().resolve()
+        if not input_raster_path.exists():
+            raise TerrainDerivativesError(
+                f"Preprocessed raster path not found for derivatives: {input_raster_path}"
+            )
+
+        try:
+            with rasterio.open(input_raster_path) as src:
+                if src.count != 1:
+                    raise TerrainDerivativesError(
+                        "Derivative stage only supports single-band rasters, "
+                        f"got {src.count} for {input_raster_path}"
+                    )
+                xres = float(abs(src.transform.a))
+                yres = float(abs(src.transform.e))
+                if xres == 0.0 or yres == 0.0:
+                    raise TerrainDerivativesError(
+                        f"Raster has invalid pixel size for derivatives: {input_raster_path}"
+                    )
+
+                data = src.read(1).astype(np.float32)
+                nodata_mask = _build_nodata_mask(
+                    data,
+                    cast(float | int | str | None, src.nodata),
+                )
+                processed_inputs += 1
+
+                slope = _compute_slope(data, nodata_mask, xres=xres, yres=yres)
+                relief = _compute_local_relief(
+                    data,
+                    nodata_mask,
+                    relief_window_size=relief_window_size,
+                )
+
+                for derivative_name, derivative_array in (
+                    ("slope", slope),
+                    ("local_relief", relief),
+                ):
+                    output_path = (
+                        raster_root
+                        / record.aoi_id
+                        / record.terrain_source_id
+                        / f"{input_raster_path.stem}__{derivative_name}.tif"
+                    )
+                    _write_derivative_raster(output_path, src.profile, derivative_array)
+                    records.append(
+                        DerivedRasterRecord(
+                            aoi_id=record.aoi_id,
+                            split=record.split,
+                            terrain_source_id=record.terrain_source_id,
+                            input_raster_path=str(input_raster_path),
+                            derivative_name=cast(Literal["slope", "local_relief"], derivative_name),
+                            output_raster_path=str(output_path),
+                            width=src.width,
+                            height=src.height,
+                            dtype="float32",
+                            nodata=float(DERIVATIVE_OUTPUT_NODATA),
+                            relief_window_size=(
+                                relief_window_size if derivative_name == "local_relief" else None
+                            ),
+                        )
+                    )
+        except RasterioError as exc:
+            raise TerrainDerivativesError(
+                f"Derivative computation failed for {input_raster_path}: {exc}"
+            ) from exc
+
+    return TerrainDerivativesSummary(
+        project_name=terrain_preprocessing_summary.project_name,
+        project_root=str(project_root),
+        terrain_preprocessing_artifact="",
+        output_root=str(derivatives_root),
+        output_summary_path=str(output_summary_path),
+        total_input_rasters_processed=processed_inputs,
+        total_derivative_rasters_written=len(records),
+        relief_window_size=relief_window_size,
+        records=records,
+    )
+
+
+def write_terrain_derivatives_summary(
+    summary: TerrainDerivativesSummary, output_path: str | Path
 ) -> Path:
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)

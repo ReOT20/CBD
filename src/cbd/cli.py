@@ -13,11 +13,15 @@ from cbd import __version__
 from cbd.data.aois import normalize_aoi
 from cbd.data.labels import normalize_labels
 from cbd.data.terrain import (
+    TerrainDerivativesError,
     TerrainPreprocessingError,
     TerrainResolutionError,
+    derive_terrain_features,
+    load_terrain_preprocessing_summary,
     load_terrain_resolution_summary,
     preprocess_terrain_inputs,
     resolve_terrain_inputs,
+    write_terrain_derivatives_summary,
     write_terrain_preprocessing_summary,
     write_terrain_resolution_summary,
 )
@@ -277,6 +281,81 @@ def preprocess_terrain_command(
 
     console.print(table)
     console.print("[green]Terrain preprocessing completed successfully.[/green]")
+
+
+@app.command("derive-terrain-features")
+def derive_terrain_features_command(
+    terrain_preprocessing_path: Annotated[
+        Path,
+        typer.Argument(help="Path to terrain_preprocessing_summary.json"),
+    ],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root",
+            help=(
+                "Optional derivatives output root. Defaults to "
+                "outputs/interim/terrain under the project root."
+            ),
+        ),
+    ] = None,
+    relief_window_size: Annotated[
+        int,
+        typer.Option(
+            "--relief-window-size",
+            help="Odd square window size in pixels for local relief.",
+        ),
+    ] = 5,
+) -> None:
+    try:
+        preprocessing_summary = load_terrain_preprocessing_summary(terrain_preprocessing_path)
+        derivatives_summary = derive_terrain_features(
+            preprocessing_summary,
+            output_root=output_root,
+            relief_window_size=relief_window_size,
+        )
+        derivatives_summary = derivatives_summary.model_copy(
+            update={
+                "terrain_preprocessing_artifact": str(
+                    Path(terrain_preprocessing_path).expanduser().resolve()
+                )
+            }
+        )
+        out = write_terrain_derivatives_summary(
+            derivatives_summary,
+            derivatives_summary.output_summary_path,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except TerrainDerivativesError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=3) from exc
+    except ValidationError as exc:
+        console.print("[red]Terrain derivatives artifact validation failed.[/red]")
+        console.print(format_validation_error(exc))
+        raise typer.Exit(code=4) from exc
+
+    table = Table(title="Terrain derivatives summary")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("Project", derivatives_summary.project_name)
+    table.add_row(
+        "Input rasters",
+        str(derivatives_summary.total_input_rasters_processed),
+    )
+    table.add_row(
+        "Derivative rasters",
+        str(derivatives_summary.total_derivative_rasters_written),
+    )
+    table.add_row(
+        "Relief window",
+        str(derivatives_summary.relief_window_size),
+    )
+    table.add_row("Artifact", str(out))
+
+    console.print(table)
+    console.print("[green]Terrain derivatives completed successfully.[/green]")
 
 
 if __name__ == "__main__":
