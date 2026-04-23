@@ -184,3 +184,22 @@ def test_resolve_terrain_inputs_command_fails_for_empty_terrain_root(tmp_path: P
     assert result.exit_code == 4
     assert "nc_lidar_1m_validation" in result.stdout
     assert "No TIFF rasters found" in result.stdout
+
+
+def test_resolve_terrain_inputs_command_fails_for_invalid_aoi_split(tmp_path: Path) -> None:
+    data_path, aoi_path = _write_manifest_pair(tmp_path)
+    _write_test_geojson(tmp_path / "data" / "raw" / "aoi" / "train_aoi_01.geojson")
+    _write_test_geojson(tmp_path / "data" / "raw" / "aoi" / "val_aoi_01.geojson")
+    _touch_raster(tmp_path / "data" / "raw" / "dem" / "nc_10m" / "tile_001.tif")
+    _touch_raster(tmp_path / "data" / "raw" / "dem" / "nc_1m_validation" / "tile_101.tif")
+    _touch_raster(tmp_path / "data" / "raw" / "dem" / "copernicus_30m" / "tile_201.tif")
+
+    payload = yaml.safe_load(aoi_path.read_text(encoding="utf-8"))
+    payload["aoi_sets"][1]["split"] = "holdout"
+    aoi_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    result = runner.invoke(app, ["resolve-terrain-inputs", str(data_path), str(aoi_path)])
+
+    assert result.exit_code == 4
+    assert "AOI manifest split for 'val_aoi_01'" in result.stdout
+    assert "allowed split values" in result.stdout

@@ -28,7 +28,12 @@ from sklearn.metrics import (  # pyright: ignore[reportMissingImports]
     roc_auc_score,
 )
 
-from cbd.data.common import clean_geometries, read_vector
+from cbd.data.common import (
+    clean_geometries,
+    read_vector,
+    validate_split_value,
+    validate_split_values,
+)
 from cbd.manifests import (
     SUPPORTED_TERRAIN_SOURCE_IDS,
     AoiManifest,
@@ -402,6 +407,13 @@ def resolve_manifest_path(project_root: Path, raw_path: str) -> Path:
 def _validate_aoi_paths(project_root: Path, manifest: AoiManifest) -> list[ResolvedAoi]:
     resolved: list[ResolvedAoi] = []
     for aoi in get_enabled_aois(manifest):
+        try:
+            split = validate_split_value(
+                aoi.split,
+                context=f"AOI manifest split for '{aoi.id}'",
+            )
+        except ValueError as exc:
+            raise TerrainResolutionError(str(exc)) from exc
         geometry_path = resolve_manifest_path(project_root, aoi.geometry_path)
         if not geometry_path.exists():
             raise TerrainResolutionError(
@@ -410,7 +422,7 @@ def _validate_aoi_paths(project_root: Path, manifest: AoiManifest) -> list[Resol
         resolved.append(
             ResolvedAoi(
                 id=aoi.id,
-                split=aoi.split,
+                split=split,
                 geometry_path=str(geometry_path),
                 notes=list(aoi.notes),
             )
@@ -1249,6 +1261,15 @@ def _load_normalized_labels(labels_path: str | Path) -> gpd.GeoDataFrame:
         )
     if gdf.crs is None:
         raise TerrainBaselineEvaluationError("Normalized labels vector has no CRS.")
+    try:
+        normalized_splits = validate_split_values(
+            gdf["split"].tolist(),
+            context="Normalized labels split column",
+        )
+    except ValueError as exc:
+        raise TerrainBaselineEvaluationError(str(exc)) from exc
+    gdf = gdf.copy()
+    gdf["split"] = normalized_splits
     return gpd.GeoDataFrame(gdf, geometry="geometry", crs=gdf.crs)
 
 
@@ -1287,6 +1308,15 @@ def _load_candidate_geometries(
             raise TerrainBaselineEvaluationError(
                 f"Candidate vector has no CRS: {candidate_vector_path}"
             )
+        try:
+            normalized_splits = validate_split_values(
+                gdf["split"].tolist(),
+                context=f"Candidate vector split column for {candidate_vector_path}",
+            )
+        except ValueError as exc:
+            raise TerrainBaselineEvaluationError(str(exc)) from exc
+        gdf = gdf.copy()
+        gdf["split"] = normalized_splits
         gdf["output_vector_path"] = str(candidate_vector_path)
         frames.append(gdf)
 
@@ -1380,6 +1410,13 @@ def _load_baseline_rows(
     normalized["output_vector_path"] = normalized["output_vector_path"].astype(str)
     _normalize_optional_text_column(normalized, "matched_label_id")
     _normalize_optional_text_column(normalized, "matched_negative_label_id")
+    try:
+        normalized["split"] = validate_split_values(
+            normalized["split"].tolist(),
+            context="Terrain baseline rows split column",
+        )
+    except ValueError as exc:
+        raise TerrainFinalInventoryError(str(exc)) from exc
 
     int_columns = ["pixel_count", "is_hard_negative_match", "target_label", "predicted_label"]
     float_columns = [
@@ -2038,7 +2075,15 @@ def evaluate_terrain_baseline(
     candidate_rows["is_hard_negative_match"] = is_hard_negative_matches
     candidate_rows["target_label"] = target_labels
 
-    train_mask = candidate_rows["split"] != "val"
+    try:
+        candidate_rows["split"] = validate_split_values(
+            candidate_rows["split"].tolist(),
+            context="Candidate row split column for evaluation",
+        )
+    except ValueError as exc:
+        raise TerrainBaselineEvaluationError(str(exc)) from exc
+
+    train_mask = candidate_rows["split"] == "train"
     val_mask = candidate_rows["split"] == "val"
     candidate_rows["training_weight"] = 1.0
     candidate_rows.loc[
@@ -2050,7 +2095,11 @@ def evaluate_terrain_baseline(
 
     if train_rows.empty:
         raise TerrainBaselineEvaluationError(
-            "No non-validation candidate rows available for training."
+            "No train candidate rows available for training."
+        )
+    if val_rows.empty:
+        raise TerrainBaselineEvaluationError(
+            "No val candidate rows available for evaluation."
         )
     train_unique_targets = sorted(set(cast(list[int], train_rows["target_label"].tolist())))
     if len(train_unique_targets) < 2:

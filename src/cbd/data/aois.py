@@ -4,7 +4,13 @@ from pathlib import Path
 
 import geopandas as gpd
 
-from cbd.data.common import clean_geometries, ensure_crs, read_vector, write_vector
+from cbd.data.common import (
+    clean_geometries,
+    ensure_crs,
+    read_vector,
+    validate_split_value,
+    write_vector,
+)
 
 
 def normalize_aoi(
@@ -14,6 +20,7 @@ def normalize_aoi(
     aoi_id: str = "aoi_0001",
     split: str = "train",
 ) -> Path:
+    split = validate_split_value(split, context="AOI split")
     gdf = read_vector(input_path)
     gdf = ensure_crs(gdf, target_crs)
     gdf = clean_geometries(gdf)
@@ -27,4 +34,3 @@ def normalize_aoi(
     normalized["notes"] = ""
 
     return write_vector(normalized, output_path)
-

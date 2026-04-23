@@ -615,6 +615,7 @@ def test_evaluate_terrain_baseline_ignores_seed_hard_negatives_for_target_assign
         / "nc_dem_10m_opentopography" / "train_pos__candidates.geojson"
     )
     train_seed_neg_vector = train_pos_vector.with_name("train_seed_neg__candidates.geojson")
+    val_pos_vector = train_pos_vector.with_name("val_pos__candidates.geojson")
 
     _write_candidate_vector(
         train_pos_vector,
@@ -638,6 +639,17 @@ def test_evaluate_terrain_baseline_ignores_seed_hard_negatives_for_target_assign
         mean_local_relief=0.8,
         max_local_relief=1.0,
     )
+    _write_candidate_vector(
+        val_pos_vector,
+        candidate_id="val_pos__cand_0001",
+        aoi_id="val_aoi_01",
+        split="val",
+        source_raster_stem="val_pos",
+        geometry=Polygon([(10, 10), (12, 10), (12, 12), (10, 12)]),
+        pixel_count=18,
+        mean_local_relief=2.4,
+        max_local_relief=3.1,
+    )
 
     artifact_path = _write_candidates_artifact(
         tmp_path,
@@ -656,6 +668,14 @@ def test_evaluate_terrain_baseline_ignores_seed_hard_negatives_for_target_assign
                 split="train",
                 source_raster_stem="train_seed_neg",
                 candidate_vector_path=train_seed_neg_vector,
+                candidate_count=1,
+            ),
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="val_aoi_01",
+                split="val",
+                source_raster_stem="val_pos",
+                candidate_vector_path=val_pos_vector,
                 candidate_count=1,
             ),
         ],
@@ -679,6 +699,16 @@ def test_evaluate_terrain_baseline_ignores_seed_hard_negatives_for_target_assign
                 pixel_count=8,
                 mean_local_relief=0.8,
                 max_local_relief=1.0,
+            ),
+            _candidate_record(
+                candidate_id="val_pos__cand_0001",
+                aoi_id="val_aoi_01",
+                split="val",
+                source_raster_stem="val_pos",
+                output_vector_path=val_pos_vector,
+                pixel_count=18,
+                mean_local_relief=2.4,
+                max_local_relief=3.1,
             ),
         ],
     )
@@ -704,6 +734,15 @@ def test_evaluate_terrain_baseline_ignores_seed_hard_negatives_for_target_assign
                 "review_status": "seed",
                 "notes": "",
                 "geometry": Polygon([(5, 5), (7, 5), (7, 7), (5, 7)]),
+            },
+            {
+                "label_id": "label_val_pos_0001",
+                "class_name": "positive_complete",
+                "source_id": "carolina_bays_labels",
+                "split": "val",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": Polygon([(10, 10), (12, 10), (12, 12), (10, 12)]),
             },
         ],
     )
@@ -1517,6 +1556,170 @@ def test_evaluate_terrain_baseline_fails_for_invalid_reviewed_hard_negative_weig
 
     assert result.exit_code == 3
     assert "Reviewed hard-negative weight must be greater than 0" in result.stdout
+
+
+def test_evaluate_terrain_baseline_fails_for_invalid_candidate_split(tmp_path: Path) -> None:
+    vector_path = (
+        tmp_path / "outputs" / "interim" / "terrain" / "candidates" / "train_aoi_01"
+        / "nc_dem_10m_opentopography" / "train_pos__candidates.geojson"
+    )
+    _write_candidate_vector(
+        vector_path,
+        candidate_id="train_pos__cand_0001",
+        aoi_id="train_aoi_01",
+        split="holdout",
+        source_raster_stem="train_pos",
+        geometry=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+        pixel_count=20,
+        mean_local_relief=2.5,
+        max_local_relief=3.0,
+    )
+    artifact_path = _write_candidates_artifact(
+        tmp_path,
+        vectors=[
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="holdout",
+                source_raster_stem="train_pos",
+                candidate_vector_path=vector_path,
+                candidate_count=1,
+            )
+        ],
+        records=[
+            _candidate_record(
+                candidate_id="train_pos__cand_0001",
+                aoi_id="train_aoi_01",
+                split="holdout",
+                source_raster_stem="train_pos",
+                output_vector_path=vector_path,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+            )
+        ],
+    )
+    labels_path = tmp_path / "data" / "labels" / "normalized_labels.geojson"
+    _write_normalized_labels(
+        labels_path,
+        [
+            {
+                "label_id": "label_train_000001",
+                "class_name": "positive_complete",
+                "source_id": "carolina_bays_labels",
+                "split": "train",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+            }
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["evaluate-terrain-baseline", str(artifact_path), str(labels_path)],
+    )
+
+    assert result.exit_code == 3
+    assert "Candidate vector split column" in result.stdout
+    assert "allowed split values" in result.stdout
+
+
+def test_evaluate_terrain_baseline_fails_for_missing_val_rows(tmp_path: Path) -> None:
+    train_pos_vector = (
+        tmp_path / "outputs" / "interim" / "terrain" / "candidates" / "train_aoi_01"
+        / "nc_dem_10m_opentopography" / "train_pos__candidates.geojson"
+    )
+    train_neg_vector = train_pos_vector.with_name("train_neg__candidates.geojson")
+
+    _write_candidate_vector(
+        train_pos_vector,
+        candidate_id="train_pos__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_pos",
+        geometry=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+        pixel_count=20,
+        mean_local_relief=2.5,
+        max_local_relief=3.0,
+    )
+    _write_candidate_vector(
+        train_neg_vector,
+        candidate_id="train_neg__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_neg",
+        geometry=Polygon([(5, 5), (7, 5), (7, 7), (5, 7)]),
+        pixel_count=8,
+        mean_local_relief=0.8,
+        max_local_relief=1.0,
+    )
+    artifact_path = _write_candidates_artifact(
+        tmp_path,
+        vectors=[
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                candidate_vector_path=train_pos_vector,
+                candidate_count=1,
+            ),
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_neg",
+                candidate_vector_path=train_neg_vector,
+                candidate_count=1,
+            ),
+        ],
+        records=[
+            _candidate_record(
+                candidate_id="train_pos__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                output_vector_path=train_pos_vector,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+            ),
+            _candidate_record(
+                candidate_id="train_neg__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_neg",
+                output_vector_path=train_neg_vector,
+                pixel_count=8,
+                mean_local_relief=0.8,
+                max_local_relief=1.0,
+            ),
+        ],
+    )
+    labels_path = tmp_path / "data" / "labels" / "normalized_labels.geojson"
+    _write_normalized_labels(
+        labels_path,
+        [
+            {
+                "label_id": "label_train_000001",
+                "class_name": "positive_complete",
+                "source_id": "carolina_bays_labels",
+                "split": "train",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+            }
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["evaluate-terrain-baseline", str(artifact_path), str(labels_path)],
+    )
+
+    assert result.exit_code == 3
+    assert "No val candidate rows available for evaluation" in result.stdout
 
 
 def test_evaluate_terrain_baseline_fails_for_unreadable_candidate_vector(tmp_path: Path) -> None:

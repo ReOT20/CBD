@@ -48,6 +48,26 @@ def test_normalize_labels_command(tmp_path: Path) -> None:
     assert len(gdf) == 1
 
 
+def test_normalize_labels_command_fails_for_invalid_split(tmp_path: Path) -> None:
+    input_path = tmp_path / "input_labels.geojson"
+    output_path = tmp_path / "normalized" / "labels.geojson"
+    _write_test_geojson(input_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "normalize-labels",
+            str(input_path),
+            str(output_path),
+            "--split",
+            "dev",
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert "Label split must use one of the allowed split values" in result.stdout
+
+
 def test_normalize_labels_by_aoi_command(tmp_path: Path) -> None:
     input_path = tmp_path / "input_labels.geojson"
     output_path = tmp_path / "normalized" / "labels_by_aoi.geojson"
@@ -157,6 +177,26 @@ def test_normalize_aoi_command(tmp_path: Path) -> None:
     assert len(gdf) == 1
 
 
+def test_normalize_aoi_command_fails_for_invalid_split(tmp_path: Path) -> None:
+    input_path = tmp_path / "input_aoi.geojson"
+    output_path = tmp_path / "normalized" / "aoi.geojson"
+    _write_test_geojson(input_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "normalize-aoi",
+            str(input_path),
+            str(output_path),
+            "--split",
+            "test",
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert "AOI split must use one of the allowed split values" in result.stdout
+
+
 def test_seed_hard_negatives_command(tmp_path: Path) -> None:
     input_path = tmp_path / "inventory.geojson"
     output_path = tmp_path / "normalized" / "hard_negatives.geojson"
@@ -217,3 +257,39 @@ def test_seed_hard_negatives_command(tmp_path: Path) -> None:
         == "split=val;aoi_id=val_aoi_01;terrain_source_id=nc_dem_10m_opentopography;"
         "source_raster_stem=tile_val;candidate_id=cand_high"
     )
+
+
+def test_seed_hard_negatives_command_fails_for_invalid_split(tmp_path: Path) -> None:
+    input_path = tmp_path / "inventory.geojson"
+    output_path = tmp_path / "normalized" / "hard_negatives.geojson"
+    inventory = gpd.GeoDataFrame(
+        {
+            "candidate_id": ["cand_high"],
+            "aoi_id": ["val_aoi_01"],
+            "split": ["val"],
+            "terrain_source_id": ["nc_dem_10m_opentopography"],
+            "source_raster_stem": ["tile_val"],
+            "target_label": [0],
+            "score": [0.22],
+            "pixel_count": [700],
+            "max_local_relief": [4.5],
+        },
+        geometry=[Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])],
+        crs="EPSG:4326",
+    )
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    inventory.to_file(input_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "seed-hard-negatives",
+            str(input_path),
+            str(output_path),
+            "--split",
+            "holdout",
+        ],
+    )
+
+    assert result.exit_code == 3
+    assert "Hard-negative seed split must use one of the allowed split values" in result.stdout

@@ -10,6 +10,8 @@ from cbd.data.common import (
     clean_geometries,
     ensure_crs,
     read_vector,
+    validate_split_value,
+    validate_split_values,
     write_vector,
 )
 from cbd.manifests import AoiManifest, get_enabled_aois
@@ -36,6 +38,7 @@ def normalize_labels(
     source_id: str = "carolina_bays_labels",
     split: str = "train",
 ) -> Path:
+    split = validate_split_value(split, context="Label split")
     gdf = read_vector(input_path)
     gdf = ensure_crs(gdf, target_crs)
     gdf = clean_geometries(gdf)
@@ -72,6 +75,7 @@ def _load_aoi_geometry_index(
     project_root = _infer_project_root(aoi_manifest_path)
     indexed_aois: list[tuple[str, BaseGeometry]] = []
     for aoi in get_enabled_aois(aoi_manifest):
+        split = validate_split_value(aoi.split, context=f"AOI manifest split for '{aoi.id}'")
         geometry_path = (project_root / aoi.geometry_path).expanduser().resolve()
         aoi_gdf = read_vector(geometry_path)
         aoi_gdf = ensure_crs(aoi_gdf, target_crs)
@@ -81,7 +85,7 @@ def _load_aoi_geometry_index(
         geometry = aoi_gdf.union_all()
         if geometry.is_empty:
             raise ValueError(f"AOI dataset is empty after union: {geometry_path}")
-        indexed_aois.append((aoi.split, cast(BaseGeometry, geometry)))
+        indexed_aois.append((split, cast(BaseGeometry, geometry)))
     return indexed_aois
 
 
@@ -152,6 +156,7 @@ def seed_hard_negative_labels(
     min_pixels: int = 50,
     min_max_local_relief: float = 2.0,
 ) -> Path:
+    split = validate_split_value(split, context="Hard-negative seed split")
     if top_n < 1:
         raise ValueError(f"top_n must be >= 1, got {top_n}.")
     if min_score < 0.0 or min_score > 1.0:
@@ -181,6 +186,7 @@ def seed_hard_negative_labels(
         raise ValueError(
             f"Input inventory is missing required column(s): {missing}."
         )
+    validate_split_values(gdf["split"].tolist(), context="Input inventory split column")
 
     candidate_rows = gdf.loc[
         (gdf["split"] == split)
