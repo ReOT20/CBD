@@ -360,8 +360,482 @@ def test_evaluate_terrain_baseline_success(tmp_path: Path) -> None:
     val_positive = next(row for row in row_table if row["candidate_id"] == "val_pos__cand_0001")
     assert train_positive["target_label"] == "1"
     assert train_positive["matched_label_id"] == "label_train_000001"
+    assert train_positive["matched_negative_label_id"] == ""
+    assert train_positive["best_negative_iou"] == "0.0"
+    assert train_positive["is_hard_negative_match"] == "0"
     assert val_positive["target_label"] == "1"
     assert val_positive["matched_label_id"] == "label_val_000001"
+    assert val_positive["matched_negative_label_id"] == ""
+    assert val_positive["best_negative_iou"] == "0.0"
+    assert val_positive["is_hard_negative_match"] == "0"
+
+
+def test_evaluate_terrain_baseline_uses_reviewed_hard_negatives_for_train_only(
+    tmp_path: Path,
+) -> None:
+    train_pos_vector = (
+        tmp_path / "outputs" / "interim" / "terrain" / "candidates" / "train_aoi_01"
+        / "nc_dem_10m_opentopography" / "train_pos__candidates.geojson"
+    )
+    train_hard_neg_vector = train_pos_vector.with_name("train_hard_neg__candidates.geojson")
+    val_hard_neg_vector = train_pos_vector.with_name("val_hard_neg__candidates.geojson")
+    val_pos_vector = train_pos_vector.with_name("val_pos__candidates.geojson")
+
+    _write_candidate_vector(
+        train_pos_vector,
+        candidate_id="train_pos__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_pos",
+        geometry=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+        pixel_count=20,
+        mean_local_relief=2.5,
+        max_local_relief=3.0,
+    )
+    _write_candidate_vector(
+        train_hard_neg_vector,
+        candidate_id="train_hard_neg__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_hard_neg",
+        geometry=Polygon([(5, 5), (7, 5), (7, 7), (5, 7)]),
+        pixel_count=15,
+        mean_local_relief=2.1,
+        max_local_relief=2.8,
+    )
+    _write_candidate_vector(
+        val_hard_neg_vector,
+        candidate_id="val_hard_neg__cand_0001",
+        aoi_id="val_aoi_01",
+        split="val",
+        source_raster_stem="val_hard_neg",
+        geometry=Polygon([(10, 10), (12, 10), (12, 12), (10, 12)]),
+        pixel_count=14,
+        mean_local_relief=2.0,
+        max_local_relief=2.4,
+    )
+    _write_candidate_vector(
+        val_pos_vector,
+        candidate_id="val_pos__cand_0001",
+        aoi_id="val_aoi_01",
+        split="val",
+        source_raster_stem="val_pos",
+        geometry=Polygon([(20, 20), (22, 20), (22, 22), (20, 22)]),
+        pixel_count=18,
+        mean_local_relief=2.4,
+        max_local_relief=3.1,
+    )
+
+    artifact_path = _write_candidates_artifact(
+        tmp_path,
+        vectors=[
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                candidate_vector_path=train_pos_vector,
+                candidate_count=1,
+            ),
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_hard_neg",
+                candidate_vector_path=train_hard_neg_vector,
+                candidate_count=1,
+            ),
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="val_aoi_01",
+                split="val",
+                source_raster_stem="val_hard_neg",
+                candidate_vector_path=val_hard_neg_vector,
+                candidate_count=1,
+            ),
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="val_aoi_01",
+                split="val",
+                source_raster_stem="val_pos",
+                candidate_vector_path=val_pos_vector,
+                candidate_count=1,
+            ),
+        ],
+        records=[
+            _candidate_record(
+                candidate_id="train_pos__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                output_vector_path=train_pos_vector,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+            ),
+            _candidate_record(
+                candidate_id="train_hard_neg__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_hard_neg",
+                output_vector_path=train_hard_neg_vector,
+                pixel_count=15,
+                mean_local_relief=2.1,
+                max_local_relief=2.8,
+            ),
+            _candidate_record(
+                candidate_id="val_hard_neg__cand_0001",
+                aoi_id="val_aoi_01",
+                split="val",
+                source_raster_stem="val_hard_neg",
+                output_vector_path=val_hard_neg_vector,
+                pixel_count=14,
+                mean_local_relief=2.0,
+                max_local_relief=2.4,
+            ),
+            _candidate_record(
+                candidate_id="val_pos__cand_0001",
+                aoi_id="val_aoi_01",
+                split="val",
+                source_raster_stem="val_pos",
+                output_vector_path=val_pos_vector,
+                pixel_count=18,
+                mean_local_relief=2.4,
+                max_local_relief=3.1,
+            ),
+        ],
+    )
+
+    labels_path = tmp_path / "data" / "labels" / "normalized_labels.geojson"
+    _write_normalized_labels(
+        labels_path,
+        [
+            {
+                "label_id": "label_train_pos_0001",
+                "class_name": "positive_complete",
+                "source_id": "carolina_bays_labels",
+                "split": "train",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+            },
+            {
+                "label_id": "label_train_neg_0001",
+                "class_name": "negative_hard",
+                "source_id": "hard_negatives_seed",
+                "split": "train",
+                "review_status": "reviewed",
+                "notes": "",
+                "geometry": Polygon([(5, 5), (7, 5), (7, 7), (5, 7)]),
+            },
+            {
+                "label_id": "label_val_neg_0001",
+                "class_name": "negative_hard",
+                "source_id": "hard_negatives_seed",
+                "split": "val",
+                "review_status": "reviewed",
+                "notes": "",
+                "geometry": Polygon([(10, 10), (12, 10), (12, 12), (10, 12)]),
+            },
+            {
+                "label_id": "label_val_pos_0001",
+                "class_name": "positive_complete",
+                "source_id": "carolina_bays_labels",
+                "split": "val",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": Polygon([(20, 20), (22, 20), (22, 22), (20, 22)]),
+            },
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["evaluate-terrain-baseline", str(artifact_path), str(labels_path)],
+    )
+
+    assert result.exit_code == 0
+
+    rows_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "evaluation"
+        / "terrain_baseline_rows.csv"
+    )
+    metrics_path = rows_path.with_name("terrain_baseline_metrics.json")
+    with rows_path.open(encoding="utf-8", newline="") as handle:
+        row_table = list(csv.DictReader(handle))
+
+    train_hard_negative = next(
+        row for row in row_table if row["candidate_id"] == "train_hard_neg__cand_0001"
+    )
+    val_hard_negative = next(
+        row for row in row_table if row["candidate_id"] == "val_hard_neg__cand_0001"
+    )
+    val_positive = next(row for row in row_table if row["candidate_id"] == "val_pos__cand_0001")
+
+    assert train_hard_negative["target_label"] == "0"
+    assert train_hard_negative["matched_label_id"] == ""
+    assert train_hard_negative["matched_negative_label_id"] == "label_train_neg_0001"
+    assert train_hard_negative["best_negative_iou"] == "1.0"
+    assert train_hard_negative["is_hard_negative_match"] == "1"
+
+    assert val_hard_negative["target_label"] == "0"
+    assert val_hard_negative["matched_label_id"] == ""
+    assert val_hard_negative["matched_negative_label_id"] == "label_val_neg_0001"
+    assert val_hard_negative["best_negative_iou"] == "1.0"
+    assert val_hard_negative["is_hard_negative_match"] == "1"
+
+    assert val_positive["target_label"] == "1"
+    assert val_positive["matched_label_id"] == "label_val_pos_0001"
+    assert val_positive["matched_negative_label_id"] == ""
+    assert val_positive["is_hard_negative_match"] == "0"
+
+    metrics_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert metrics_payload["train_positive_count"] == 1
+    assert metrics_payload["train_negative_count"] == 1
+    assert metrics_payload["val_positive_count"] == 1
+    assert metrics_payload["val_negative_count"] == 1
+
+
+def test_evaluate_terrain_baseline_ignores_seed_hard_negatives_for_target_assignment(
+    tmp_path: Path,
+) -> None:
+    train_pos_vector = (
+        tmp_path / "outputs" / "interim" / "terrain" / "candidates" / "train_aoi_01"
+        / "nc_dem_10m_opentopography" / "train_pos__candidates.geojson"
+    )
+    train_seed_neg_vector = train_pos_vector.with_name("train_seed_neg__candidates.geojson")
+
+    _write_candidate_vector(
+        train_pos_vector,
+        candidate_id="train_pos__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_pos",
+        geometry=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+        pixel_count=20,
+        mean_local_relief=2.5,
+        max_local_relief=3.0,
+    )
+    _write_candidate_vector(
+        train_seed_neg_vector,
+        candidate_id="train_seed_neg__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_seed_neg",
+        geometry=Polygon([(5, 5), (7, 5), (7, 7), (5, 7)]),
+        pixel_count=8,
+        mean_local_relief=0.8,
+        max_local_relief=1.0,
+    )
+
+    artifact_path = _write_candidates_artifact(
+        tmp_path,
+        vectors=[
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                candidate_vector_path=train_pos_vector,
+                candidate_count=1,
+            ),
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_seed_neg",
+                candidate_vector_path=train_seed_neg_vector,
+                candidate_count=1,
+            ),
+        ],
+        records=[
+            _candidate_record(
+                candidate_id="train_pos__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                output_vector_path=train_pos_vector,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+            ),
+            _candidate_record(
+                candidate_id="train_seed_neg__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_seed_neg",
+                output_vector_path=train_seed_neg_vector,
+                pixel_count=8,
+                mean_local_relief=0.8,
+                max_local_relief=1.0,
+            ),
+        ],
+    )
+
+    labels_path = tmp_path / "data" / "labels" / "normalized_labels.geojson"
+    _write_normalized_labels(
+        labels_path,
+        [
+            {
+                "label_id": "label_train_pos_0001",
+                "class_name": "positive_complete",
+                "source_id": "carolina_bays_labels",
+                "split": "train",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+            },
+            {
+                "label_id": "label_train_neg_seed_0001",
+                "class_name": "negative_hard",
+                "source_id": "hard_negatives_seed",
+                "split": "train",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": Polygon([(5, 5), (7, 5), (7, 7), (5, 7)]),
+            },
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["evaluate-terrain-baseline", str(artifact_path), str(labels_path)],
+    )
+
+    assert result.exit_code == 0
+    rows_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "evaluation"
+        / "terrain_baseline_rows.csv"
+    )
+    with rows_path.open(encoding="utf-8", newline="") as handle:
+        row_table = list(csv.DictReader(handle))
+
+    seed_negative = next(
+        row for row in row_table if row["candidate_id"] == "train_seed_neg__cand_0001"
+    )
+    assert seed_negative["target_label"] == "0"
+    assert seed_negative["matched_negative_label_id"] == ""
+    assert seed_negative["best_negative_iou"] == "0.0"
+    assert seed_negative["is_hard_negative_match"] == "0"
+
+
+def test_evaluate_terrain_baseline_fails_for_conflicting_positive_and_hard_negative_matches(
+    tmp_path: Path,
+) -> None:
+    train_pos_vector = (
+        tmp_path / "outputs" / "interim" / "terrain" / "candidates" / "train_aoi_01"
+        / "nc_dem_10m_opentopography" / "train_pos__candidates.geojson"
+    )
+    train_neg_vector = train_pos_vector.with_name("train_neg__candidates.geojson")
+
+    _write_candidate_vector(
+        train_pos_vector,
+        candidate_id="train_pos__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_pos",
+        geometry=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+        pixel_count=20,
+        mean_local_relief=2.5,
+        max_local_relief=3.0,
+    )
+    _write_candidate_vector(
+        train_neg_vector,
+        candidate_id="train_neg__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_neg",
+        geometry=Polygon([(5, 5), (7, 5), (7, 7), (5, 7)]),
+        pixel_count=8,
+        mean_local_relief=0.8,
+        max_local_relief=1.0,
+    )
+
+    artifact_path = _write_candidates_artifact(
+        tmp_path,
+        vectors=[
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                candidate_vector_path=train_pos_vector,
+                candidate_count=1,
+            ),
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_neg",
+                candidate_vector_path=train_neg_vector,
+                candidate_count=1,
+            ),
+        ],
+        records=[
+            _candidate_record(
+                candidate_id="train_pos__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                output_vector_path=train_pos_vector,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+            ),
+            _candidate_record(
+                candidate_id="train_neg__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_neg",
+                output_vector_path=train_neg_vector,
+                pixel_count=8,
+                mean_local_relief=0.8,
+                max_local_relief=1.0,
+            ),
+        ],
+    )
+
+    labels_path = tmp_path / "data" / "labels" / "normalized_labels.geojson"
+    overlap_geometry = Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])
+    _write_normalized_labels(
+        labels_path,
+        [
+            {
+                "label_id": "label_train_pos_0001",
+                "class_name": "positive_complete",
+                "source_id": "carolina_bays_labels",
+                "split": "train",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": overlap_geometry,
+            },
+            {
+                "label_id": "label_train_neg_0001",
+                "class_name": "negative_hard",
+                "source_id": "hard_negatives_seed",
+                "split": "train",
+                "review_status": "reviewed",
+                "notes": "",
+                "geometry": overlap_geometry,
+            },
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["evaluate-terrain-baseline", str(artifact_path), str(labels_path)],
+    )
+
+    assert result.exit_code == 3
+    assert "Candidate matches both positive and reviewed hard-negative labels" in result.stdout
 
 
 def test_evaluate_terrain_baseline_ignores_cross_split_label_matches(tmp_path: Path) -> None:

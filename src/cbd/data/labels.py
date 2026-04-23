@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import geopandas as gpd
 from shapely.geometry.base import BaseGeometry
@@ -16,6 +16,17 @@ from cbd.manifests import AoiManifest, get_enabled_aois
 
 DEFAULT_LABEL_CLASS = "positive_complete"
 DEFAULT_REVIEW_STATUS = "seed"
+DEFAULT_HARD_NEGATIVE_CLASS = "negative_hard"
+
+
+def _seed_parent_source_record(row: object, available_columns: set[str]) -> str:
+    row_any = cast(Any, row)
+    parts = [f"split={row_any.split}"]
+    for column in ["aoi_id", "terrain_source_id", "source_raster_stem"]:
+        if column in available_columns:
+            parts.append(f"{column}={getattr(row_any, column)}")
+    parts.append(f"candidate_id={row_any.candidate_id}")
+    return ";".join(parts)
 
 
 def normalize_labels(
@@ -125,5 +136,94 @@ def normalize_labels_by_aoi(
     normalized["split"] = splits
     normalized["review_status"] = DEFAULT_REVIEW_STATUS
     normalized["notes"] = ""
+
+    return write_vector(normalized, output_path)
+
+
+def seed_hard_negative_labels(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    split: str = "val",
+    source_id: str = "hard_negatives_seed",
+    target_crs: str = "EPSG:4326",
+    top_n: int = 25,
+    min_score: float = 0.05,
+    min_pixels: int = 50,
+    min_max_local_relief: float = 2.0,
+) -> Path:
+    if top_n < 1:
+        raise ValueError(f"top_n must be >= 1, got {top_n}.")
+    if min_score < 0.0 or min_score > 1.0:
+        raise ValueError(f"min_score must be between 0 and 1, got {min_score}.")
+    if min_pixels < 1:
+        raise ValueError(f"min_pixels must be >= 1, got {min_pixels}.")
+    if min_max_local_relief < 0.0:
+        raise ValueError(
+            f"min_max_local_relief must be >= 0, got {min_max_local_relief}."
+        )
+
+    gdf = read_vector(input_path)
+    gdf = ensure_crs(gdf, target_crs)
+    gdf = clean_geometries(gdf)
+
+    required_columns = {
+        "candidate_id",
+        "split",
+        "target_label",
+        "score",
+        "pixel_count",
+        "max_local_relief",
+    }
+    missing_columns = required_columns - set(gdf.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(
+            f"Input inventory is missing required column(s): {missing}."
+        )
+
+    candidate_rows = gdf.loc[
+        (gdf["split"] == split)
+        & (gdf["target_label"] == 0)
+        & (gdf["score"] >= min_score)
+        & (gdf["pixel_count"] >= min_pixels)
+        & (gdf["max_local_relief"] >= min_max_local_relief)
+    ].copy()
+
+    if candidate_rows.empty:
+        raise ValueError(
+            "No candidate rows matched the hard-negative seed criteria."
+        )
+
+    candidate_rows = candidate_rows.sort_values(
+        by=["score", "max_local_relief", "pixel_count"],
+        ascending=[False, False, False],
+        kind="mergesort",
+    ).head(top_n)
+    available_columns = set(candidate_rows.columns)
+
+    normalized = gpd.GeoDataFrame(geometry=candidate_rows.geometry.copy(), crs=gdf.crs)
+    normalized["label_id"] = [f"{source_id}_{i:06d}" for i in range(len(normalized))]
+    normalized["class_name"] = DEFAULT_HARD_NEGATIVE_CLASS
+    normalized["source_id"] = source_id
+    normalized["split"] = split
+    normalized["review_status"] = DEFAULT_REVIEW_STATUS
+    normalized["notes"] = [
+        (
+            f"seeded_from_candidate_id={row.candidate_id};"
+            f"score={float(row.score):.6f};"
+            f"pixel_count={int(row.pixel_count)};"
+            f"max_local_relief={float(row.max_local_relief):.6f}"
+        )
+        for row in candidate_rows.itertuples()
+    ]
+    normalized["error_category"] = "terrain_large_steep_nonbay"
+    normalized["parent_source_record"] = cast(
+        list[str],
+        [
+            _seed_parent_source_record(row, available_columns)
+            for row in candidate_rows.itertuples(index=False)
+        ],
+    )
 
     return write_vector(normalized, output_path)

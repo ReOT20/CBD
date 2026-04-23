@@ -155,3 +155,65 @@ def test_normalize_aoi_command(tmp_path: Path) -> None:
     assert "aoi_id" in gdf.columns
     assert "split" in gdf.columns
     assert len(gdf) == 1
+
+
+def test_seed_hard_negatives_command(tmp_path: Path) -> None:
+    input_path = tmp_path / "inventory.geojson"
+    output_path = tmp_path / "normalized" / "hard_negatives.geojson"
+    inventory = gpd.GeoDataFrame(
+        {
+            "candidate_id": ["cand_high", "cand_low", "cand_train"],
+            "aoi_id": ["val_aoi_01", "val_aoi_01", "train_aoi_01"],
+            "split": ["val", "val", "train"],
+            "terrain_source_id": [
+                "nc_dem_10m_opentopography",
+                "nc_dem_10m_opentopography",
+                "nc_dem_10m_opentopography",
+            ],
+            "source_raster_stem": ["tile_val", "tile_val", "tile_train"],
+            "target_label": [0, 0, 0],
+            "score": [0.22, 0.01, 0.45],
+            "pixel_count": [700, 20, 900],
+            "max_local_relief": [4.5, 1.1, 5.0],
+        },
+        geometry=[
+            Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
+            Polygon([(2, 2), (3, 2), (3, 3), (2, 3)]),
+            Polygon([(4, 4), (5, 4), (5, 5), (4, 5)]),
+        ],
+        crs="EPSG:4326",
+    )
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    inventory.to_file(input_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "seed-hard-negatives",
+            str(input_path),
+            str(output_path),
+            "--split",
+            "val",
+            "--top-n",
+            "5",
+            "--min-score",
+            "0.05",
+            "--min-pixels",
+            "50",
+            "--min-max-local-relief",
+            "2.0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert output_path.exists()
+    gdf = gpd.read_file(output_path)
+    assert len(gdf) == 1
+    assert gdf.loc[0, "class_name"] == "negative_hard"
+    assert gdf.loc[0, "split"] == "val"
+    assert gdf.loc[0, "source_id"] == "hard_negatives_seed"
+    assert (
+        gdf.loc[0, "parent_source_record"]
+        == "split=val;aoi_id=val_aoi_01;terrain_source_id=nc_dem_10m_opentopography;"
+        "source_raster_stem=tile_val;candidate_id=cand_high"
+    )

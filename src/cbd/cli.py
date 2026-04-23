@@ -11,7 +11,11 @@ from rich.table import Table
 
 from cbd import __version__
 from cbd.data.aois import normalize_aoi
-from cbd.data.labels import normalize_labels, normalize_labels_by_aoi
+from cbd.data.labels import (
+    normalize_labels,
+    normalize_labels_by_aoi,
+    seed_hard_negative_labels,
+)
 from cbd.data.terrain import (
     TerrainBaselineEvaluationError,
     TerrainCandidatesError,
@@ -161,6 +165,49 @@ def normalize_labels_by_aoi_command(
         raise typer.Exit(code=3) from exc
 
     console.print(f"[green]Split-aware normalized labels written to {out}[/green]")
+
+
+@app.command("seed-hard-negatives")
+def seed_hard_negatives_command(
+    input_path: Annotated[
+        Path,
+        typer.Argument(help="Input scored final inventory GeoJSON/GeoPackage"),
+    ],
+    output_path: Annotated[
+        Path,
+        typer.Argument(help="Output hard-negative seed vector file"),
+    ],
+    split: Annotated[str, typer.Option(help="Split to seed negatives from")] = "val",
+    source_id: Annotated[str, typer.Option(help="Source identifier")] = "hard_negatives_seed",
+    target_crs: Annotated[str, typer.Option(help="Target CRS")] = "EPSG:4326",
+    top_n: Annotated[int, typer.Option(help="Maximum number of seed negatives to export")] = 25,
+    min_score: Annotated[float, typer.Option(help="Minimum score threshold")] = 0.05,
+    min_pixels: Annotated[int, typer.Option(help="Minimum candidate pixel count")] = 50,
+    min_max_local_relief: Annotated[
+        float,
+        typer.Option(help="Minimum candidate max local relief"),
+    ] = 2.0,
+) -> None:
+    try:
+        out = seed_hard_negative_labels(
+            input_path=input_path,
+            output_path=output_path,
+            split=split,
+            source_id=source_id,
+            target_crs=target_crs,
+            top_n=top_n,
+            min_score=min_score,
+            min_pixels=min_pixels,
+            min_max_local_relief=min_max_local_relief,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=3) from exc
+
+    console.print(f"[green]Hard-negative seeds written to {out}[/green]")
 
 
 @app.command("normalize-aoi")

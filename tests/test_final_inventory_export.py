@@ -88,6 +88,9 @@ def _evaluation_row(
     max_local_relief: float,
     matched_label_id: str | None,
     best_iou: float,
+    matched_negative_label_id: str | None = None,
+    best_negative_iou: float = 0.0,
+    is_hard_negative_match: int = 0,
     target_label: int,
     score: float,
     predicted_label: int,
@@ -110,6 +113,9 @@ def _evaluation_row(
         "max_slope": max_local_relief / 2.0,
         "matched_label_id": matched_label_id,
         "best_iou": best_iou,
+        "matched_negative_label_id": matched_negative_label_id,
+        "best_negative_iou": best_negative_iou,
+        "is_hard_negative_match": is_hard_negative_match,
         "target_label": target_label,
         "score": score,
         "predicted_label": predicted_label,
@@ -192,6 +198,9 @@ def _write_evaluation_artifact(tmp_path: Path, rows: list[dict[str, object]]) ->
         "max_slope",
         "matched_label_id",
         "best_iou",
+        "matched_negative_label_id",
+        "best_negative_iou",
+        "is_hard_negative_match",
         "target_label",
         "score",
         "predicted_label",
@@ -447,6 +456,9 @@ def test_export_final_inventory_success(tmp_path: Path) -> None:
     assert float(train_row["score"]) == 0.91
     assert str(train_row["output_vector_path"]) == str(train_vector.resolve())
     assert float(train_row.geometry.area) == 4.0
+    assert train_row["matched_negative_label_id"] is None
+    assert float(train_row["best_negative_iou"]) == 0.0
+    assert int(train_row["is_hard_negative_match"]) == 0
 
     with csv_path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -456,12 +468,125 @@ def test_export_final_inventory_success(tmp_path: Path) -> None:
         "val_source__cand_0001",
     ]
     assert "train_source__cand_0002" not in {row["candidate_id"] for row in rows}
+    val_row = next(row for row in rows if row["candidate_id"] == "val_source__cand_0001")
+    assert val_row["matched_negative_label_id"] == ""
+    assert val_row["best_negative_iou"] == "0.0"
+    assert val_row["is_hard_negative_match"] == "0"
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["total_exported_features"] == 2
     assert summary["split_counts"] == {"train": 1, "val": 1}
     assert summary["predicted_positive_count"] == 1
     assert summary["predicted_negative_count"] == 1
+
+
+def test_export_final_inventory_propagates_hard_negative_diagnostics(tmp_path: Path) -> None:
+    train_vector = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "candidates"
+        / "train_aoi_01"
+        / "nc_dem_10m_opentopography"
+        / "train_source__candidates.geojson"
+    )
+    _write_candidate_vector(
+        train_vector,
+        [
+            {
+                **_candidate_record(
+                    candidate_id="train_source__cand_0001",
+                    aoi_id="train_aoi_01",
+                    split="train",
+                    source_raster_stem="train_source",
+                    output_vector_path=train_vector,
+                    pixel_count=20,
+                    mean_local_relief=2.5,
+                    max_local_relief=3.0,
+                ),
+                "geometry": Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+            }
+        ],
+    )
+    candidates_path = _write_candidates_artifact(
+        tmp_path,
+        vectors=[
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_source",
+                candidate_vector_path=train_vector,
+                candidate_count=1,
+            )
+        ],
+        records=[
+            _candidate_record(
+                candidate_id="train_source__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_source",
+                output_vector_path=train_vector,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+            )
+        ],
+    )
+    evaluation_path = _write_evaluation_artifact(
+        tmp_path,
+        [
+            _evaluation_row(
+                candidate_id="train_source__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_source",
+                output_vector_path=train_vector,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+                matched_label_id=None,
+                best_iou=0.0,
+                matched_negative_label_id="label_train_neg_0001",
+                best_negative_iou=0.82,
+                is_hard_negative_match=1,
+                target_label=0,
+                score=0.18,
+                predicted_label=0,
+            )
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        ["export-final-inventory", str(evaluation_path), str(candidates_path)],
+    )
+
+    assert result.exit_code == 0
+
+    geojson_path = tmp_path / "outputs" / "final" / "terrain" / "terrain_final_inventory.geojson"
+    csv_path = tmp_path / "outputs" / "final" / "terrain" / "terrain_final_inventory.csv"
+    summary_path = (
+        tmp_path / "outputs" / "final" / "terrain" / "terrain_final_inventory_summary.json"
+    )
+
+    gdf = gpd.read_file(geojson_path)
+    row = gdf.iloc[0]
+    assert row["matched_negative_label_id"] == "label_train_neg_0001"
+    assert float(row["best_negative_iou"]) == 0.82
+    assert int(row["is_hard_negative_match"]) == 1
+
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["matched_negative_label_id"] == "label_train_neg_0001"
+    assert rows[0]["best_negative_iou"] == "0.82"
+    assert rows[0]["is_hard_negative_match"] == "1"
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["records"][0]["matched_negative_label_id"] == "label_train_neg_0001"
+    assert float(summary["records"][0]["best_negative_iou"]) == 0.82
+    assert summary["records"][0]["is_hard_negative_match"] == 1
 
 
 def test_export_final_inventory_fails_for_missing_evaluation_artifact(tmp_path: Path) -> None:
@@ -664,3 +789,125 @@ def test_export_final_inventory_fails_for_unreadable_candidate_vector(tmp_path: 
 
     assert result.exit_code == 3
     assert "Candidate vector could not be read for evaluation" in result.stdout
+
+
+def test_export_final_inventory_fails_for_old_rows_artifact_missing_hard_negative_columns(
+    tmp_path: Path,
+) -> None:
+    vector_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "candidates"
+        / "train_aoi_01"
+        / "nc_dem_10m_opentopography"
+        / "train_source__candidates.geojson"
+    )
+    _write_candidate_vector(
+        vector_path,
+        [
+            {
+                **_candidate_record(
+                    candidate_id="train_source__cand_0001",
+                    aoi_id="train_aoi_01",
+                    split="train",
+                    source_raster_stem="train_source",
+                    output_vector_path=vector_path,
+                    pixel_count=20,
+                    mean_local_relief=2.5,
+                    max_local_relief=3.0,
+                ),
+                "geometry": Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+            }
+        ],
+    )
+    candidates_path = _write_candidates_artifact(
+        tmp_path,
+        vectors=[
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_source",
+                candidate_vector_path=vector_path,
+                candidate_count=1,
+            )
+        ],
+        records=[
+            _candidate_record(
+                candidate_id="train_source__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_source",
+                output_vector_path=vector_path,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+            )
+        ],
+    )
+    evaluation_path = _write_evaluation_artifact(
+        tmp_path,
+        [
+            _evaluation_row(
+                candidate_id="train_source__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_source",
+                output_vector_path=vector_path,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+                matched_label_id="label_train_0001",
+                best_iou=0.9,
+                matched_negative_label_id="label_train_neg_0001",
+                best_negative_iou=0.82,
+                is_hard_negative_match=1,
+                target_label=1,
+                score=0.91,
+                predicted_label=1,
+            )
+        ],
+    )
+
+    rows_path = (
+        tmp_path
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "evaluation"
+        / "terrain_baseline_rows.csv"
+    )
+    with rows_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    legacy_fieldnames = [
+        field
+        for field in rows[0].keys()
+        if field
+        not in {
+            "matched_negative_label_id",
+            "best_negative_iou",
+            "is_hard_negative_match",
+        }
+    ]
+    with rows_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=legacy_fieldnames)
+        writer.writeheader()
+        writer.writerows(
+            [{field: row[field] for field in legacy_fieldnames} for row in rows]
+        )
+
+    result = runner.invoke(
+        app,
+        ["export-final-inventory", str(evaluation_path), str(candidates_path)],
+    )
+
+    assert result.exit_code == 3
+    assert "Terrain baseline rows artifact is missing required hard-negative diagnostic" in (
+        result.stdout
+    )
+    assert "final inventory export" in result.stdout
+    assert "matched_negative_label_id" in result.stdout
+    assert "best_negative_iou" in result.stdout
+    assert "is_hard_negative_match" in result.stdout

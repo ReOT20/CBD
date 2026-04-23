@@ -63,3 +63,11 @@ def test_validate_manifests_command(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "Validation successful" in result.stdout
     assert "carolina-bays-mvp" in result.stdout
+
+
+def test_seed_hard_negatives_help_describes_scored_inventory_input() -> None:
+    result = runner.invoke(app, ["seed-hard-negatives", "--help"])
+
+    assert result.exit_code == 0
+    assert "Input scored final inventory GeoJSON/GeoPackage" in result.stdout
+    assert "candidate vector file" not in result.stdout

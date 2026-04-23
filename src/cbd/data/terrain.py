@@ -276,6 +276,9 @@ class TerrainBaselineRowRecord(BaseModel):
     max_slope: float
     matched_label_id: str | None = None
     best_iou: float = 0.0
+    matched_negative_label_id: str | None = None
+    best_negative_iou: float = 0.0
+    is_hard_negative_match: int
     target_label: int
     score: float
     predicted_label: int
@@ -336,6 +339,9 @@ class FinalInventoryFeatureRecord(BaseModel):
     max_slope: float
     matched_label_id: str | None = None
     best_iou: float = 0.0
+    matched_negative_label_id: str | None = None
+    best_negative_iou: float = 0.0
+    is_hard_negative_match: int
     target_label: int
     score: float
     predicted_label: int
@@ -1312,6 +1318,9 @@ def _load_baseline_rows(
         "max_slope",
         "matched_label_id",
         "best_iou",
+        "matched_negative_label_id",
+        "best_negative_iou",
+        "is_hard_negative_match",
         "target_label",
         "score",
         "predicted_label",
@@ -1319,6 +1328,21 @@ def _load_baseline_rows(
     missing_columns = required_columns - set(rows.columns)
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
+        hard_negative_diagnostic_columns = {
+            "matched_negative_label_id",
+            "best_negative_iou",
+            "is_hard_negative_match",
+        }
+        missing_hard_negative_columns = hard_negative_diagnostic_columns & missing_columns
+        if missing_hard_negative_columns:
+            missing_hard_negative = ", ".join(sorted(missing_hard_negative_columns))
+            raise TerrainFinalInventoryError(
+                "Terrain baseline rows artifact is missing required hard-negative "
+                "diagnostic column(s) for final inventory export: "
+                f"{missing_hard_negative}. Regenerate the baseline rows artifact with "
+                "matched_negative_label_id, best_negative_iou, and "
+                "is_hard_negative_match."
+            )
         raise TerrainFinalInventoryError(
             f"Terrain baseline rows artifact is missing required column(s): {missing}."
         )
@@ -1330,12 +1354,10 @@ def _load_baseline_rows(
     normalized["terrain_source_id"] = normalized["terrain_source_id"].astype(str)
     normalized["source_raster_stem"] = normalized["source_raster_stem"].astype(str)
     normalized["output_vector_path"] = normalized["output_vector_path"].astype(str)
-    normalized["matched_label_id"] = normalized["matched_label_id"].where(
-        pd.notna(normalized["matched_label_id"]),
-        None,
-    )
+    _normalize_optional_text_column(normalized, "matched_label_id")
+    _normalize_optional_text_column(normalized, "matched_negative_label_id")
 
-    int_columns = ["pixel_count", "target_label", "predicted_label"]
+    int_columns = ["pixel_count", "is_hard_negative_match", "target_label", "predicted_label"]
     float_columns = [
         "area_map_units",
         "bbox_width",
@@ -1346,6 +1368,7 @@ def _load_baseline_rows(
         "mean_slope",
         "max_slope",
         "best_iou",
+        "best_negative_iou",
         "score",
     ]
     try:
@@ -1399,6 +1422,33 @@ def _best_label_match(
             best_iou = iou
             best_label_id = cast(str, label_row.label_id)
     return best_label_id, best_iou
+
+
+def _normalize_optional_text_column(df: pd.DataFrame, column: str) -> None:
+    df[column] = df[column].astype(object).where(
+        pd.notna(df[column]),
+        None,
+    )
+
+
+def _labels_by_split(
+    labels: gpd.GeoDataFrame,
+    *,
+    class_name: str,
+    review_status: str | None = None,
+) -> dict[str, gpd.GeoDataFrame]:
+    filtered = labels.loc[labels["class_name"] == class_name].copy()
+    if review_status is not None:
+        filtered = filtered.loc[filtered["review_status"] == review_status].copy()
+
+    labels_by_split: dict[str, gpd.GeoDataFrame] = {}
+    for split_value, frame in cast(Any, filtered.groupby("split")):
+        labels_by_split[str(split_value)] = gpd.GeoDataFrame(
+            frame,
+            geometry="geometry",
+            crs=filtered.crs,
+        )
+    return labels_by_split
 
 
 def generate_terrain_candidates(
@@ -1887,39 +1937,79 @@ def evaluate_terrain_baseline(
         raise TerrainBaselineEvaluationError("Candidate geometries have no CRS for evaluation.")
 
     labels_in_candidate_crs = labels_gdf.to_crs(candidate_rows.crs)
-    positive_labels = labels_in_candidate_crs.loc[
-        labels_in_candidate_crs["class_name"] == "positive_complete"
-    ].copy()
-    labels_by_split: dict[str, gpd.GeoDataFrame] = {}
-    for split_value, frame in cast(Any, positive_labels.groupby("split")):
-        labels_by_split[str(split_value)] = gpd.GeoDataFrame(
-            frame,
-            geometry="geometry",
-            crs=positive_labels.crs,
-        )
+    positive_labels_by_split = _labels_by_split(
+        labels_in_candidate_crs,
+        class_name="positive_complete",
+    )
+    reviewed_negative_labels_by_split = _labels_by_split(
+        labels_in_candidate_crs,
+        class_name="negative_hard",
+        review_status="reviewed",
+    )
 
     matched_label_ids: list[str | None] = []
     best_ious: list[float] = []
+    matched_negative_label_ids: list[str | None] = []
+    best_negative_ious: list[float] = []
+    is_hard_negative_matches: list[int] = []
     target_labels: list[int] = []
-    for split_value, geometry in zip(
-        cast(list[str], candidate_rows["split"].tolist()),
-        cast(list[BaseGeometry], candidate_rows.geometry.tolist()),
+    candidate_ids = cast(list[str], candidate_rows["candidate_id"].astype(str).tolist())
+    split_values = cast(list[str], candidate_rows["split"].tolist())
+    geometries = cast(list[BaseGeometry], candidate_rows.geometry.tolist())
+    for candidate_id, split_value, geometry in zip(
+        candidate_ids,
+        split_values,
+        geometries,
         strict=False,
     ):
-        split_labels = labels_by_split.get(split_value)
-        if split_labels is None:
+        split_positive_labels = positive_labels_by_split.get(split_value)
+        if split_positive_labels is None:
             matched_label_id, best_iou = None, 0.0
         else:
             matched_label_id, best_iou = _best_label_match(
                 geometry,
-                split_labels,
+                split_positive_labels,
+            )
+        split_negative_labels = reviewed_negative_labels_by_split.get(split_value)
+        if split_negative_labels is None:
+            matched_negative_label_id, best_negative_iou = None, 0.0
+        else:
+            matched_negative_label_id, best_negative_iou = _best_label_match(
+                geometry,
+                split_negative_labels,
             )
         matched_label_ids.append(matched_label_id)
         best_ious.append(best_iou)
-        target_labels.append(1 if matched_label_id is not None and best_iou >= match_iou else 0)
+        matched_negative_label_ids.append(matched_negative_label_id)
+        best_negative_ious.append(best_negative_iou)
+
+        is_positive_match = matched_label_id is not None and best_iou >= match_iou
+        is_hard_negative_match = (
+            matched_negative_label_id is not None and best_negative_iou >= match_iou
+        )
+        if is_positive_match and is_hard_negative_match:
+            raise TerrainBaselineEvaluationError(
+                "Candidate matches both positive and reviewed hard-negative labels in the "
+                f"same split: candidate_id={candidate_id}, split={split_value}, "
+                f"positive_label_id={matched_label_id}, "
+                f"negative_label_id={matched_negative_label_id}."
+            )
+
+        is_hard_negative_matches.append(int(is_hard_negative_match))
+        if split_value == "val":
+            target_labels.append(1 if is_positive_match else 0)
+        elif is_positive_match:
+            target_labels.append(1)
+        elif is_hard_negative_match:
+            target_labels.append(0)
+        else:
+            target_labels.append(0)
 
     candidate_rows["matched_label_id"] = matched_label_ids
     candidate_rows["best_iou"] = best_ious
+    candidate_rows["matched_negative_label_id"] = matched_negative_label_ids
+    candidate_rows["best_negative_iou"] = best_negative_ious
+    candidate_rows["is_hard_negative_match"] = is_hard_negative_matches
     candidate_rows["target_label"] = target_labels
 
     train_mask = candidate_rows["split"] != "val"
@@ -1979,6 +2069,9 @@ def evaluate_terrain_baseline(
         "max_slope",
         "matched_label_id",
         "best_iou",
+        "matched_negative_label_id",
+        "best_negative_iou",
+        "is_hard_negative_match",
         "target_label",
         "score",
         "predicted_label",
@@ -2181,6 +2274,9 @@ def export_final_inventory(
         "max_slope",
         "matched_label_id",
         "best_iou",
+        "matched_negative_label_id",
+        "best_negative_iou",
+        "is_hard_negative_match",
         "target_label",
         "score",
         "predicted_label",
@@ -2193,6 +2289,8 @@ def export_final_inventory(
         ascending=True,
         kind="mergesort",
     )
+    _normalize_optional_text_column(ordered, "matched_label_id")
+    _normalize_optional_text_column(ordered, "matched_negative_label_id")
     inventory_gdf = gpd.GeoDataFrame(
         ordered,
         geometry="geometry",
@@ -2216,6 +2314,9 @@ def export_final_inventory(
     predicted_positive_count = int(cast(pd.Series, inventory_gdf["predicted_label"]).sum())
     total_exported_features = int(len(inventory_gdf))
     predicted_negative_count = total_exported_features - predicted_positive_count
+    summary_records_df = pd.DataFrame(inventory_gdf[export_fields]).copy()
+    _normalize_optional_text_column(summary_records_df, "matched_label_id")
+    _normalize_optional_text_column(summary_records_df, "matched_negative_label_id")
 
     summary = TerrainFinalInventorySummary(
         project_name=terrain_candidates_summary.project_name,
@@ -2246,7 +2347,7 @@ def export_final_inventory(
         ],
         records=[
             FinalInventoryFeatureRecord.model_validate(record)
-            for record in _dataframe_record_rows(pd.DataFrame(inventory_gdf[export_fields]))
+            for record in _dataframe_record_rows(summary_records_df)
         ],
     )
     return summary
