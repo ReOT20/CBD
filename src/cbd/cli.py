@@ -13,12 +13,14 @@ from cbd import __version__
 from cbd.data.aois import normalize_aoi
 from cbd.data.labels import normalize_labels
 from cbd.data.terrain import (
+    TerrainBaselineEvaluationError,
     TerrainCandidatesError,
     TerrainDerivativesError,
     TerrainPreprocessingError,
     TerrainResolutionError,
     TerrainReviewError,
     derive_terrain_features,
+    evaluate_terrain_baseline,
     generate_terrain_candidates,
     load_terrain_candidates_summary,
     load_terrain_derivatives_summary,
@@ -27,6 +29,7 @@ from cbd.data.terrain import (
     prepare_terrain_review_artifacts,
     preprocess_terrain_inputs,
     resolve_terrain_inputs,
+    write_terrain_baseline_evaluation_summary,
     write_terrain_candidates_summary,
     write_terrain_derivatives_summary,
     write_terrain_preprocessing_summary,
@@ -503,6 +506,78 @@ def prepare_terrain_review_command(
 
     console.print(table)
     console.print("[green]Terrain review artifact preparation completed successfully.[/green]")
+
+
+@app.command("evaluate-terrain-baseline")
+def evaluate_terrain_baseline_command(
+    terrain_candidates_path: Annotated[
+        Path,
+        typer.Argument(help="Path to terrain_candidates_summary.json"),
+    ],
+    normalized_labels_path: Annotated[
+        Path,
+        typer.Argument(help="Path to normalized labels vector"),
+    ],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root",
+            help=(
+                "Optional evaluation artifact output root. Defaults to "
+                "outputs/interim/terrain/evaluation under the project root."
+            ),
+        ),
+    ] = None,
+    match_iou: Annotated[
+        float,
+        typer.Option(
+            "--match-iou",
+            help="Minimum same-split candidate-to-label IoU used to assign positive targets.",
+        ),
+    ] = 0.10,
+) -> None:
+    try:
+        candidates_summary = load_terrain_candidates_summary(terrain_candidates_path)
+        evaluation_summary = evaluate_terrain_baseline(
+            candidates_summary,
+            normalized_labels_path=normalized_labels_path,
+            output_root=output_root,
+            match_iou=match_iou,
+        )
+        evaluation_summary = evaluation_summary.model_copy(
+            update={
+                "terrain_candidates_artifact": str(
+                    Path(terrain_candidates_path).expanduser().resolve()
+                )
+            }
+        )
+        out = write_terrain_baseline_evaluation_summary(
+            evaluation_summary,
+            evaluation_summary.output_summary_path,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except (TerrainBaselineEvaluationError, TerrainReviewError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=3) from exc
+    except ValidationError as exc:
+        console.print("[red]Terrain baseline evaluation artifact validation failed.[/red]")
+        console.print(format_validation_error(exc))
+        raise typer.Exit(code=4) from exc
+
+    table = Table(title="Terrain baseline evaluation summary")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("Project", evaluation_summary.project_name)
+    table.add_row("Train rows", str(evaluation_summary.metrics.train_row_count))
+    table.add_row("Val rows", str(evaluation_summary.metrics.val_row_count))
+    table.add_row("Val F1", str(evaluation_summary.metrics.val_f1))
+    table.add_row("Val ROC AUC", str(evaluation_summary.metrics.val_roc_auc))
+    table.add_row("Artifact", str(out))
+
+    console.print(table)
+    console.print("[green]Terrain baseline evaluation completed successfully.[/green]")
 
 
 if __name__ == "__main__":

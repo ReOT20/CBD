@@ -19,6 +19,13 @@ from scipy.ndimage import generic_filter, label
 from shapely.geometry import mapping, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
+from sklearn.linear_model import LogisticRegression  # pyright: ignore[reportMissingImports]
+from sklearn.metrics import (  # pyright: ignore[reportMissingImports]
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 from cbd.data.common import clean_geometries, read_vector
 from cbd.manifests import (
@@ -49,6 +56,10 @@ class TerrainCandidatesError(ValueError):
 
 
 class TerrainReviewError(ValueError):
+    pass
+
+
+class TerrainBaselineEvaluationError(ValueError):
     pass
 
 
@@ -243,11 +254,73 @@ class TerrainCuratedReviewManifest(BaseModel):
     artifacts: list[CuratedReviewArtifactRecord]
 
 
+class TerrainBaselineRowRecord(BaseModel):
+    candidate_id: str
+    aoi_id: str
+    split: str
+    terrain_source_id: str
+    source_raster_stem: str
+    output_vector_path: str
+    pixel_count: int
+    area_map_units: float
+    bbox_width: float
+    bbox_height: float
+    bbox_aspect_ratio: float
+    mean_local_relief: float
+    max_local_relief: float
+    mean_slope: float
+    max_slope: float
+    matched_label_id: str | None = None
+    best_iou: float = 0.0
+    target_label: int
+    score: float
+    predicted_label: int
+
+
+class TerrainBaselinePredictionArtifactRecord(BaseModel):
+    split: str
+    row_count: int
+    positive_count: int
+    output_path: str
+
+
+class TerrainBaselineMetrics(BaseModel):
+    threshold: float
+    train_row_count: int
+    val_row_count: int
+    train_positive_count: int
+    train_negative_count: int
+    val_positive_count: int
+    val_negative_count: int
+    val_precision: float
+    val_recall: float
+    val_f1: float
+    val_roc_auc: float | None = None
+
+
+class TerrainBaselineEvaluationSummary(BaseModel):
+    project_name: str
+    project_root: str
+    terrain_candidates_artifact: str
+    normalized_labels_path: str
+    output_root: str
+    output_summary_path: str
+    rows_output_path: str
+    metrics_output_path: str
+    failure_analysis_output_path: str
+    match_iou_threshold: float
+    classification_threshold: float
+    prediction_artifacts: list[TerrainBaselinePredictionArtifactRecord]
+    metrics: TerrainBaselineMetrics
+
+
 DERIVATIVE_OUTPUT_NODATA = -9999.0
 CURATED_REVIEW_SORT_POLICY = (
     "max_local_relief_desc__mean_local_relief_desc__pixel_count_desc__candidate_id_asc"
 )
 CURATED_REVIEW_LARGE_CANDIDATE_MIN_PIXELS = 16
+BASELINE_CLASSIFICATION_THRESHOLD = 0.5
+BASELINE_RANDOM_STATE = 42
 
 
 def infer_project_root(manifest_path: str | Path, project_root: str | Path | None = None) -> Path:
@@ -514,6 +587,16 @@ def _default_candidates_root(project_root: str | Path) -> Path:
 
 def _default_review_root(project_root: str | Path) -> Path:
     return Path(project_root).expanduser().resolve() / "outputs" / "interim" / "terrain"
+
+
+def _default_evaluation_root(project_root: str | Path) -> Path:
+    return (
+        Path(project_root).expanduser().resolve()
+        / "outputs"
+        / "interim"
+        / "terrain"
+        / "evaluation"
+    )
 
 
 def _validate_relief_window_size(relief_window_size: int) -> None:
@@ -987,6 +1070,10 @@ def _write_review_table(
         writer.writerows(rows)
 
 
+def _dataframe_record_rows(df: pd.DataFrame) -> list[dict[str, object]]:
+    return cast(list[dict[str, object]], df.to_dict(orient="records"))
+
+
 def _candidate_row_sort_key(row: dict[str, object]) -> tuple[float, float, int, str]:
     return (
         -cast(float, row["max_local_relief"]),
@@ -1028,6 +1115,136 @@ def _write_curated_review_manifest(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
     return output_path
+
+
+def _write_json_artifact(payload: BaseModel | dict[str, Any], output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(payload, BaseModel):
+        output_path.write_text(payload.model_dump_json(indent=2), encoding="utf-8")
+    else:
+        output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return output_path
+
+
+def _validate_match_iou_threshold(match_iou: float) -> None:
+    if match_iou < 0.0 or match_iou > 1.0:
+        raise TerrainBaselineEvaluationError(
+            f"Match IoU threshold must be between 0 and 1, got {match_iou}."
+        )
+
+
+def _load_normalized_labels(labels_path: str | Path) -> gpd.GeoDataFrame:
+    gdf = read_vector(labels_path)
+    gdf = clean_geometries(gdf)
+    required_columns = {"label_id", "class_name", "split"}
+    missing_columns = required_columns - set(gdf.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise TerrainBaselineEvaluationError(
+            f"Normalized labels vector is missing required column(s): {missing}."
+        )
+    if gdf.crs is None:
+        raise TerrainBaselineEvaluationError("Normalized labels vector has no CRS.")
+    return gpd.GeoDataFrame(gdf, geometry="geometry", crs=gdf.crs)
+
+
+def _load_candidate_geometries(
+    terrain_candidates_summary: TerrainCandidatesSummary,
+) -> gpd.GeoDataFrame:
+    frames: list[gpd.GeoDataFrame] = []
+    for vector_record in terrain_candidates_summary.vectors:
+        candidate_vector_path = Path(vector_record.candidate_vector_path).expanduser().resolve()
+        if not candidate_vector_path.exists():
+            raise TerrainBaselineEvaluationError(
+                f"Candidate vector path not found for evaluation: {candidate_vector_path}"
+            )
+        try:
+            gdf = gpd.read_file(candidate_vector_path)
+        except Exception as exc:
+            raise TerrainBaselineEvaluationError(
+                f"Candidate vector could not be read for evaluation: {candidate_vector_path}"
+            ) from exc
+
+        required_columns = {
+            "candidate_id",
+            "aoi_id",
+            "split",
+            "terrain_source_id",
+            "source_raster_stem",
+        }
+        missing_columns = required_columns - set(gdf.columns)
+        if missing_columns:
+            missing = ", ".join(sorted(missing_columns))
+            raise TerrainBaselineEvaluationError(
+                f"Candidate vector is missing required column(s): {missing}."
+            )
+        gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=gdf.crs)
+        if gdf.crs is None:
+            raise TerrainBaselineEvaluationError(
+                f"Candidate vector has no CRS: {candidate_vector_path}"
+            )
+        gdf["output_vector_path"] = str(candidate_vector_path)
+        frames.append(gdf)
+
+    if not frames:
+        return gpd.GeoDataFrame(
+            {
+                "candidate_id": [],
+                "aoi_id": [],
+                "split": [],
+                "terrain_source_id": [],
+                "source_raster_stem": [],
+                "output_vector_path": [],
+            },
+            geometry=gpd.GeoSeries([], crs=None),
+            crs=None,
+        )
+
+    return gpd.GeoDataFrame(
+        pd.concat(frames, ignore_index=True),
+        geometry="geometry",
+        crs=frames[0].crs,
+    )
+
+
+def _candidate_feature_frame(
+    terrain_candidates_summary: TerrainCandidatesSummary,
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            record.model_dump()
+            for record in terrain_candidates_summary.records
+        ]
+    )
+
+
+def _best_label_match(
+    geometry: BaseGeometry,
+    split_labels: gpd.GeoDataFrame,
+) -> tuple[str | None, float]:
+    if split_labels.empty:
+        return None, 0.0
+
+    intersecting = split_labels.loc[split_labels.intersects(geometry)].copy()
+    if intersecting.empty:
+        return None, 0.0
+
+    best_label_id: str | None = None
+    best_iou = 0.0
+    geometry_area = float(geometry.area)
+    for label_row in intersecting.itertuples():
+        label_geometry = cast(BaseGeometry, label_row.geometry)
+        intersection_area = float(geometry.intersection(label_geometry).area)
+        if intersection_area <= 0.0:
+            continue
+        union_area = geometry_area + float(label_geometry.area) - intersection_area
+        if union_area <= 0.0:
+            continue
+        iou = float(intersection_area / union_area)
+        if iou > best_iou:
+            best_iou = iou
+            best_label_id = cast(str, label_row.label_id)
+    return best_label_id, best_iou
 
 
 def generate_terrain_candidates(
@@ -1462,3 +1679,265 @@ def write_terrain_review_summary(summary: TerrainReviewSummary, output_path: str
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
     return path
+
+
+def evaluate_terrain_baseline(
+    terrain_candidates_summary: TerrainCandidatesSummary,
+    *,
+    normalized_labels_path: str | Path,
+    output_root: str | Path | None = None,
+    match_iou: float = 0.10,
+) -> TerrainBaselineEvaluationSummary:
+    _validate_match_iou_threshold(match_iou)
+
+    project_root = Path(terrain_candidates_summary.project_root).expanduser().resolve()
+    evaluation_root = (
+        _default_evaluation_root(project_root)
+        if output_root is None
+        else Path(output_root).expanduser().resolve()
+    )
+    summary_path = evaluation_root / "terrain_baseline_evaluation_summary.json"
+    rows_path = evaluation_root / "terrain_baseline_rows.csv"
+    metrics_path = evaluation_root / "terrain_baseline_metrics.json"
+    failure_analysis_path = evaluation_root / "terrain_baseline_failure_analysis.csv"
+    prediction_root = evaluation_root / "predictions"
+
+    labels_path = Path(normalized_labels_path).expanduser().resolve()
+    if not labels_path.exists():
+        raise FileNotFoundError(f"Normalized labels vector not found: {labels_path}")
+
+    labels_gdf = _load_normalized_labels(labels_path)
+    candidate_geometry_gdf = _load_candidate_geometries(terrain_candidates_summary)
+    candidate_features = _candidate_feature_frame(terrain_candidates_summary)
+
+    join_columns = [
+        "candidate_id",
+        "aoi_id",
+        "split",
+        "terrain_source_id",
+        "source_raster_stem",
+        "output_vector_path",
+    ]
+    merged = candidate_features.merge(
+        pd.DataFrame(candidate_geometry_gdf[join_columns + ["geometry"]]),
+        on=join_columns,
+        how="left",
+        validate="one_to_one",
+    )
+    if bool(merged["geometry"].isnull().any()):
+        raise TerrainBaselineEvaluationError(
+            "Failed to align candidate feature rows with candidate geometries."
+        )
+    candidate_rows = gpd.GeoDataFrame(merged, geometry="geometry", crs=candidate_geometry_gdf.crs)
+    if candidate_rows.crs is None:
+        raise TerrainBaselineEvaluationError("Candidate geometries have no CRS for evaluation.")
+
+    labels_in_candidate_crs = labels_gdf.to_crs(candidate_rows.crs)
+    positive_labels = labels_in_candidate_crs.loc[
+        labels_in_candidate_crs["class_name"] == "positive_complete"
+    ].copy()
+    labels_by_split: dict[str, gpd.GeoDataFrame] = {}
+    for split_value, frame in cast(Any, positive_labels.groupby("split")):
+        labels_by_split[str(split_value)] = gpd.GeoDataFrame(
+            frame,
+            geometry="geometry",
+            crs=positive_labels.crs,
+        )
+
+    matched_label_ids: list[str | None] = []
+    best_ious: list[float] = []
+    target_labels: list[int] = []
+    for split_value, geometry in zip(
+        cast(list[str], candidate_rows["split"].tolist()),
+        cast(list[BaseGeometry], candidate_rows.geometry.tolist()),
+        strict=False,
+    ):
+        split_labels = labels_by_split.get(split_value)
+        if split_labels is None:
+            matched_label_id, best_iou = None, 0.0
+        else:
+            matched_label_id, best_iou = _best_label_match(
+                geometry,
+                split_labels,
+            )
+        matched_label_ids.append(matched_label_id)
+        best_ious.append(best_iou)
+        target_labels.append(1 if matched_label_id is not None and best_iou >= match_iou else 0)
+
+    candidate_rows["matched_label_id"] = matched_label_ids
+    candidate_rows["best_iou"] = best_ious
+    candidate_rows["target_label"] = target_labels
+
+    train_mask = candidate_rows["split"] != "val"
+    val_mask = candidate_rows["split"] == "val"
+    train_rows = candidate_rows.loc[train_mask].copy()
+    val_rows = candidate_rows.loc[val_mask].copy()
+
+    if train_rows.empty:
+        raise TerrainBaselineEvaluationError(
+            "No non-validation candidate rows available for training."
+        )
+    train_unique_targets = sorted(set(cast(list[int], train_rows["target_label"].tolist())))
+    if len(train_unique_targets) < 2:
+        raise TerrainBaselineEvaluationError(
+            "Training rows must include both positive and negative targets for logistic regression."
+        )
+
+    feature_columns = [
+        "pixel_count",
+        "area_map_units",
+        "bbox_width",
+        "bbox_height",
+        "bbox_aspect_ratio",
+        "mean_local_relief",
+        "max_local_relief",
+        "mean_slope",
+        "max_slope",
+    ]
+    model = LogisticRegression(
+        random_state=BASELINE_RANDOM_STATE,
+        max_iter=1000,
+        class_weight=None,
+    )
+    model.fit(train_rows[feature_columns], train_rows["target_label"])
+
+    scores = model.predict_proba(candidate_rows[feature_columns])[:, 1]
+    candidate_rows["score"] = scores
+    candidate_rows["predicted_label"] = (
+        candidate_rows["score"] >= BASELINE_CLASSIFICATION_THRESHOLD
+    ).astype(int)
+
+    row_fields = [
+        "candidate_id",
+        "aoi_id",
+        "split",
+        "terrain_source_id",
+        "source_raster_stem",
+        "output_vector_path",
+        "pixel_count",
+        "area_map_units",
+        "bbox_width",
+        "bbox_height",
+        "bbox_aspect_ratio",
+        "mean_local_relief",
+        "max_local_relief",
+        "mean_slope",
+        "max_slope",
+        "matched_label_id",
+        "best_iou",
+        "target_label",
+        "score",
+        "predicted_label",
+    ]
+    row_payload = cast(pd.DataFrame, candidate_rows[row_fields].copy())
+    _write_review_table(
+        _dataframe_record_rows(row_payload),
+        rows_path,
+        fieldnames=row_fields,
+    )
+
+    prediction_artifacts: list[TerrainBaselinePredictionArtifactRecord] = []
+    for split_name in sorted(cast(set[str], set(candidate_rows["split"].tolist()))):
+        split_rows = cast(
+            pd.DataFrame,
+            candidate_rows.loc[candidate_rows["split"] == split_name, row_fields].copy(),
+        )
+        prediction_path = prediction_root / f"{split_name}_predictions.csv"
+        _write_review_table(
+            _dataframe_record_rows(split_rows),
+            prediction_path,
+            fieldnames=row_fields,
+        )
+        prediction_artifacts.append(
+            TerrainBaselinePredictionArtifactRecord(
+                split=split_name,
+                row_count=len(split_rows),
+                positive_count=int(cast(pd.Series, split_rows["target_label"]).sum()),
+                output_path=str(prediction_path),
+            )
+        )
+
+    val_target = cast(list[int], val_rows["target_label"].tolist())
+    val_predicted = cast(list[int], candidate_rows.loc[val_mask, "predicted_label"].tolist())
+    val_scores = cast(list[float], candidate_rows.loc[val_mask, "score"].tolist())
+    val_precision = (
+        float(precision_score(val_target, val_predicted, zero_division=0))
+        if len(val_target) > 0
+        else 0.0
+    )
+    val_recall = (
+        float(recall_score(val_target, val_predicted, zero_division=0))
+        if len(val_target) > 0
+        else 0.0
+    )
+    val_f1 = (
+        float(f1_score(val_target, val_predicted, zero_division=0))
+        if len(val_target) > 0
+        else 0.0
+    )
+    val_roc_auc: float | None = None
+    if len(set(val_target)) >= 2:
+        val_roc_auc = float(roc_auc_score(val_target, val_scores))
+
+    metrics = TerrainBaselineMetrics(
+        threshold=BASELINE_CLASSIFICATION_THRESHOLD,
+        train_row_count=len(train_rows),
+        val_row_count=len(val_rows),
+        train_positive_count=int(train_rows["target_label"].sum()),
+        train_negative_count=int(len(train_rows) - int(train_rows["target_label"].sum())),
+        val_positive_count=int(val_rows["target_label"].sum()),
+        val_negative_count=int(len(val_rows) - int(val_rows["target_label"].sum())),
+        val_precision=val_precision,
+        val_recall=val_recall,
+        val_f1=val_f1,
+        val_roc_auc=val_roc_auc,
+    )
+    _write_json_artifact(metrics, metrics_path)
+
+    failure_rows = candidate_rows.loc[val_mask].copy()
+    false_positives = failure_rows.loc[
+        (failure_rows["target_label"] == 0) & (failure_rows["predicted_label"] == 1)
+    ].copy()
+    false_negatives = failure_rows.loc[
+        (failure_rows["target_label"] == 1) & (failure_rows["predicted_label"] == 0)
+    ].copy()
+    false_positives["error_type"] = "false_positive"
+    false_negatives["error_type"] = "false_negative"
+    failure_analysis = cast(
+        pd.DataFrame,
+        pd.concat(
+        [
+            false_positives.sort_values("score", ascending=False),
+            false_negatives.sort_values("score"),
+        ],
+        ignore_index=True,
+        ),
+    )
+    failure_fields = row_fields + ["error_type"]
+    _write_review_table(
+        _dataframe_record_rows(failure_analysis.reindex(columns=failure_fields)),
+        failure_analysis_path,
+        fieldnames=failure_fields,
+    )
+
+    return TerrainBaselineEvaluationSummary(
+        project_name=terrain_candidates_summary.project_name,
+        project_root=str(project_root),
+        terrain_candidates_artifact="",
+        normalized_labels_path=str(labels_path),
+        output_root=str(evaluation_root),
+        output_summary_path=str(summary_path),
+        rows_output_path=str(rows_path),
+        metrics_output_path=str(metrics_path),
+        failure_analysis_output_path=str(failure_analysis_path),
+        match_iou_threshold=match_iou,
+        classification_threshold=BASELINE_CLASSIFICATION_THRESHOLD,
+        prediction_artifacts=prediction_artifacts,
+        metrics=metrics,
+    )
+
+
+def write_terrain_baseline_evaluation_summary(
+    summary: TerrainBaselineEvaluationSummary, output_path: str | Path
+) -> Path:
+    return _write_json_artifact(summary, Path(output_path).expanduser().resolve())

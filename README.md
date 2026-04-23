@@ -11,6 +11,7 @@ This repository contains the executable implementation state for:
 - DEM-first terrain preprocessing and derivatives
 - terrain-driven candidate generation
 - review artifact export
+- baseline evaluation artifact export
 
 ## Method summary
 
@@ -33,10 +34,11 @@ Implemented:
 - morphometric derivative generation
 - terrain-driven candidate generation
 - review artifact export
+- baseline evaluation artifact export
 - smoke tests
 
 Planned next:
-- evaluation and export
+- final inventory export
 
 ## Development checks
 
