@@ -1410,6 +1410,10 @@ def test_evaluate_terrain_baseline_fails_for_missing_label_columns(tmp_path: Pat
 
     assert result.exit_code == 3
     assert "Normalized labels vector is missing required column" in result.stdout
+    assert "class_name" in result.stdout
+    assert "source_id" in result.stdout
+    assert "review_status" in result.stdout
+    assert "notes" in result.stdout
 
 
 def test_evaluate_terrain_baseline_fails_for_invalid_match_iou(tmp_path: Path) -> None:

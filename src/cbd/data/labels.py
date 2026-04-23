@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,6 +21,31 @@ from cbd.manifests import AoiManifest, get_enabled_aois
 DEFAULT_LABEL_CLASS = "positive_complete"
 DEFAULT_REVIEW_STATUS = "seed"
 DEFAULT_HARD_NEGATIVE_CLASS = "negative_hard"
+
+
+def _normalize_source_attr_value(value: object) -> object:
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if hasattr(value, "item"):
+        value = cast(Any, value).item()
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _source_record_attrs(gdf: gpd.GeoDataFrame) -> list[str]:
+    attribute_columns = [column for column in gdf.columns if column != "geometry"]
+    rows: list[str] = []
+    records = cast(Any, gdf[attribute_columns]).to_dict(orient="records")
+    for record in records:
+        normalized = {
+            key: _normalize_source_attr_value(value)
+            for key, value in record.items()
+        }
+        rows.append(json.dumps(normalized, sort_keys=True))
+    return rows
 
 
 def _seed_parent_source_record(row: object, available_columns: set[str]) -> str:
@@ -49,6 +76,8 @@ def normalize_labels(
     normalized = gpd.GeoDataFrame(geometry=gdf.geometry.copy(), crs=gdf.crs)
 
     normalized["label_id"] = [f"{source_id}_{i:06d}" for i in range(len(normalized))]
+    normalized["source_record_id"] = [f"{source_id}__src_{i:06d}" for i in range(len(normalized))]
+    normalized["source_record_attrs"] = _source_record_attrs(gdf)
     normalized["class_name"] = DEFAULT_LABEL_CLASS
     normalized["source_id"] = source_id
     normalized["split"] = split
@@ -112,8 +141,11 @@ def normalize_labels_by_aoi(
     )
 
     kept_geometries: list[BaseGeometry] = []
+    source_record_ids: list[str] = []
+    source_record_attrs: list[str] = []
     splits: list[str] = []
-    for geometry in gdf.geometry.tolist():
+    source_attrs_by_row = _source_record_attrs(gdf)
+    for row_index, geometry in enumerate(gdf.geometry.tolist()):
         label_geometry = cast(BaseGeometry, geometry)
         matching_splits = sorted(
             split
@@ -128,6 +160,8 @@ def normalize_labels_by_aoi(
                 "Real-data smoke labels must map to exactly one split."
             )
         kept_geometries.append(label_geometry)
+        source_record_ids.append(f"{source_id}__src_{row_index:06d}")
+        source_record_attrs.append(source_attrs_by_row[row_index])
         splits.append(matching_splits[0])
 
     if not kept_geometries:
@@ -135,6 +169,8 @@ def normalize_labels_by_aoi(
 
     normalized = gpd.GeoDataFrame(geometry=kept_geometries, crs=target_crs)
     normalized["label_id"] = [f"{source_id}_{i:06d}" for i in range(len(normalized))]
+    normalized["source_record_id"] = source_record_ids
+    normalized["source_record_attrs"] = source_record_attrs
     normalized["class_name"] = DEFAULT_LABEL_CLASS
     normalized["source_id"] = source_id
     normalized["split"] = splits

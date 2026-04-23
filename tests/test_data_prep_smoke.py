@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any, cast
 
 import geopandas as gpd
 import yaml
@@ -20,6 +22,12 @@ def _write_test_geojson(path: Path) -> None:
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     gdf.to_file(path)
+
+
+def _decoded_source_attrs(value: object) -> dict[str, object]:
+    if isinstance(value, str):
+        return cast(dict[str, object], json.loads(value))
+    return cast(dict[str, object], value)
 
 
 def test_normalize_labels_command(tmp_path: Path) -> None:
@@ -44,8 +52,13 @@ def test_normalize_labels_command(tmp_path: Path) -> None:
     assert output_path.exists()
     gdf = gpd.read_file(output_path)
     assert "label_id" in gdf.columns
+    assert "source_record_id" in gdf.columns
+    assert "source_record_attrs" in gdf.columns
     assert "class_name" in gdf.columns
     assert len(gdf) == 1
+    assert gdf.loc[0, "source_record_id"] == "carolina_bays_labels__src_000000"
+    source_attrs = _decoded_source_attrs(gdf.loc[0, "source_record_attrs"])
+    assert source_attrs == {"name": "x"}
 
 
 def test_normalize_labels_command_fails_for_invalid_split(tmp_path: Path) -> None:
@@ -148,7 +161,15 @@ def test_normalize_labels_by_aoi_command(tmp_path: Path) -> None:
     assert len(gdf) == 2
     assert sorted(gdf["split"].tolist()) == ["train", "val"]
     assert "label_id" in gdf.columns
+    assert "source_record_id" in gdf.columns
+    assert "source_record_attrs" in gdf.columns
     assert "class_name" in gdf.columns
+    assert gdf["source_record_id"].tolist() == [
+        "carolina_bays_labels__src_000000",
+        "carolina_bays_labels__src_000001",
+    ]
+    source_attrs = [_decoded_source_attrs(value) for value in gdf["source_record_attrs"].tolist()]
+    assert source_attrs == [{"name": "train_label"}, {"name": "val_label"}]
 
 
 def test_normalize_aoi_command(tmp_path: Path) -> None:

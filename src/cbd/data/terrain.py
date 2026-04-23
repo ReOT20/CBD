@@ -1252,7 +1252,14 @@ def _validate_reviewed_hard_negative_weight(weight: float) -> None:
 def _load_normalized_labels(labels_path: str | Path) -> gpd.GeoDataFrame:
     gdf = read_vector(labels_path)
     gdf = clean_geometries(gdf)
-    required_columns = {"label_id", "class_name", "split"}
+    required_columns = {
+        "label_id",
+        "class_name",
+        "source_id",
+        "split",
+        "review_status",
+        "notes",
+    }
     missing_columns = required_columns - set(gdf.columns)
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
