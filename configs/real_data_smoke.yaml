@@ -1,0 +1,30 @@
+run:
+  name: first_real_data_smoke
+  random_seed: 42
+
+paths:
+  data_manifest: ../manifests/real_data_smoke_data_manifest.yaml
+  aoi_manifest: ../manifests/real_data_smoke_aoi_manifest.yaml
+  outputs_root: ../outputs/real_data_smoke
+  normalized_labels: ../data/interim/real_data_smoke/labels/normalized_labels.geojson
+  train_aoi_raw: ../data/raw/aoi/train_aoi_01.geojson
+  val_aoi_raw: ../data/raw/aoi/val_aoi_01.geojson
+  train_aoi_normalized: ../data/interim/real_data_smoke/aois/train_aoi_01.geojson
+  val_aoi_normalized: ../data/interim/real_data_smoke/aois/val_aoi_01.geojson
+
+pipeline:
+  terrain_source_id: nc_dem_10m_opentopography
+  enable_wetlands_context: false
+  export_debug_artifacts: true
+  geometry_holdout: true
+  include_auxiliary_layers: false
+
+review:
+  require_manual_overlay_check: true
+  candidate_density_check: true
+  known_positive_spot_check: true
+
+notes:
+  - This config is a command companion for the first small real-data MVP run.
+  - It assumes one train AOI and one validation AOI only.
+  - Use the existing CLI stages directly; no wrapper command exists yet.

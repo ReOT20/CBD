@@ -11,7 +11,7 @@ from rich.table import Table
 
 from cbd import __version__
 from cbd.data.aois import normalize_aoi
-from cbd.data.labels import normalize_labels
+from cbd.data.labels import normalize_labels, normalize_labels_by_aoi
 from cbd.data.terrain import (
     TerrainBaselineEvaluationError,
     TerrainCandidatesError,
@@ -129,6 +129,38 @@ def normalize_labels_command(
         raise typer.Exit(code=3) from exc
 
     console.print(f"[green]Normalized labels written to {out}[/green]")
+
+
+@app.command("normalize-labels-by-aoi")
+def normalize_labels_by_aoi_command(
+    input_path: Annotated[Path, typer.Argument(help="Input labels vector file")],
+    aoi_manifest_path: Annotated[Path, typer.Argument(help="Path to aoi_manifest.yaml")],
+    output_path: Annotated[Path, typer.Argument(help="Output normalized labels file")],
+    target_crs: Annotated[str, typer.Option(help="Target CRS")] = "EPSG:4326",
+    source_id: Annotated[str, typer.Option(help="Source identifier")] = "carolina_bays_labels",
+) -> None:
+    try:
+        aoi_manifest = load_aoi_manifest(aoi_manifest_path)
+        out = normalize_labels_by_aoi(
+            input_path=input_path,
+            output_path=output_path,
+            aoi_manifest=aoi_manifest,
+            aoi_manifest_path=aoi_manifest_path,
+            target_crs=target_crs,
+            source_id=source_id,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except ValidationError as exc:
+        console.print("[red]AOI manifest validation failed.[/red]")
+        console.print(format_validation_error(exc))
+        raise typer.Exit(code=4) from exc
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=3) from exc
+
+    console.print(f"[green]Split-aware normalized labels written to {out}[/green]")
 
 
 @app.command("normalize-aoi")
