@@ -54,8 +54,11 @@ These checks are the default verification path for CLI, data-layer, and pipeline
 ## First Real-Data Run
 
 For the first narrow real-data MVP integration run, use:
-- [real_data_smoke.yaml](</home/type7/Documents/spbu/thesis/CBD/configs/real_data_smoke.yaml>)
-- [first_real_data_smoke_run.md](</home/type7/Documents/spbu/thesis/docs/first_real_data_smoke_run.md>)
+- [`configs/real_data_smoke.yaml`](configs/real_data_smoke.yaml)
+- [`../docs/first_real_data_smoke_run.md`](../docs/first_real_data_smoke_run.md)
+
+Run the commands from the `CBD/` directory. The linked config and runbook are repo-relative and
+should not depend on a specific local filesystem layout.
 
 That run is intentionally limited to:
 - one train AOI
