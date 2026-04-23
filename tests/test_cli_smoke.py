@@ -71,3 +71,13 @@ def test_seed_hard_negatives_help_describes_scored_inventory_input() -> None:
     assert result.exit_code == 0
     assert "Input scored final inventory GeoJSON/GeoPackage" in result.stdout
     assert "candidate vector file" not in result.stdout
+
+
+def test_checked_in_configs_use_internal_repo_paths() -> None:
+    config_root = Path(__file__).resolve().parents[1] / "configs"
+    for config_name in ("mvp_baseline.yaml", "real_data_smoke.yaml"):
+        payload = yaml.safe_load((config_root / config_name).read_text(encoding="utf-8"))
+        path_values = payload.get("paths", {}).values()
+        for value in path_values:
+            assert isinstance(value, str)
+            assert not value.startswith("../")

@@ -1,0 +1,29 @@
+version: 1
+
+aoi_sets:
+  - id: train_aoi_01
+    split: train
+    geometry_path: data/raw/aoi/train_aoi_01.geojson
+    enabled: true
+    notes:
+      - Primary training geography for baseline development.
+
+  - id: train_aoi_02
+    split: train
+    geometry_path: data/raw/aoi/train_aoi_02.geojson
+    enabled: true
+    notes:
+      - Secondary training geography.
+
+  - id: val_aoi_01
+    split: val
+    geometry_path: data/raw/aoi/val_aoi_01.geojson
+    enabled: true
+    notes:
+      - Geographic hold-out validation area.
+
+rules:
+  geographic_holdout: true
+  allow_overlap_between_splits: false
+  export_normalized_aoi_copies: true
+

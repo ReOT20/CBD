@@ -3,14 +3,14 @@ run:
   random_seed: 42
 
 paths:
-  data_manifest: ../manifests/real_data_smoke_data_manifest.yaml
-  aoi_manifest: ../manifests/real_data_smoke_aoi_manifest.yaml
-  outputs_root: ../outputs/real_data_smoke
-  normalized_labels: ../data/interim/real_data_smoke/labels/normalized_labels.geojson
-  train_aoi_raw: ../data/raw/aoi/train_aoi_01.geojson
-  val_aoi_raw: ../data/raw/aoi/val_aoi_01.geojson
-  train_aoi_normalized: ../data/interim/real_data_smoke/aois/train_aoi_01.geojson
-  val_aoi_normalized: ../data/interim/real_data_smoke/aois/val_aoi_01.geojson
+  data_manifest: manifests/real_data_smoke_data_manifest.yaml
+  aoi_manifest: manifests/real_data_smoke_aoi_manifest.yaml
+  outputs_root: outputs/real_data_smoke
+  normalized_labels: data/interim/real_data_smoke/labels/normalized_labels.geojson
+  train_aoi_raw: data/raw/aoi/train_aoi_01.geojson
+  val_aoi_raw: data/raw/aoi/val_aoi_01.geojson
+  train_aoi_normalized: data/interim/real_data_smoke/aois/train_aoi_01.geojson
+  val_aoi_normalized: data/interim/real_data_smoke/aois/val_aoi_01.geojson
 
 pipeline:
   terrain_source_id: nc_dem_10m_opentopography

@@ -1,0 +1,32 @@
+version: 1
+
+aoi_sets:
+  - id: train_aoi_01
+    split: train
+    geometry_path: data/interim/real_data_smoke/aois/train_aoi_01.geojson
+    enabled: true
+    notes:
+      - Small training AOI for the first real-data terrain smoke run.
+      - Should contain at least a few known positives.
+
+  - id: train_aoi_02
+    split: train
+    geometry_path: data/interim/real_data_smoke/aois/train_aoi_02.geojson
+    enabled: true
+    notes:
+      - Expanded second training AOI for the larger real-data smoke run.
+      - Adds a separate Bladen/Cumberland cluster while keeping validation fixed.
+
+  - id: val_aoi_01
+    split: val
+    geometry_path: data/interim/real_data_smoke/aois/val_aoi_01.geojson
+    enabled: true
+    notes:
+      - Small geographically separated validation AOI.
+      - Keep it easy to inspect manually.
+
+rules:
+  geographic_holdout: true
+  allow_overlap_between_splits: false
+  export_normalized_aoi_copies: true
+

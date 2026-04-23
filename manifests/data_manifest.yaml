@@ -1,0 +1,190 @@
+version: 2
+
+project:
+  name: carolina-bays-benchmark
+  mode: dem_first_benchmark
+  objective: terrain_first_candidate_inventory_with_later_method_comparison
+
+sources:
+  - id: nc_dem_10m_opentopography
+    role: primary_terrain
+    enabled: true
+    type: raster_dem
+    format: geotiff_or_cloud_optimized_geotiff
+    provider: opentopography
+    access:
+      method: local_assets_or_scripted_fetch
+      auth_required: false
+    local:
+      expected_root: data/raw/dem/nc_10m/
+    notes:
+      - Main terrain source for North Carolina.
+      - Default DEM for MVP runs.
+      - Primary thesis-core modality.
+
+  - id: carolina_bays_labels
+    role: primary_labels
+    enabled: true
+    type: vector
+    format: geojson_or_service_export
+    provider: external_reference_dataset
+    access:
+      method: manual_export_or_scripted_fetch
+      auth_required: false
+    local:
+      expected_path: data/raw/labels/carolina_bays.geojson
+    notes:
+      - Primary positive reference dataset.
+      - Normalize CRS and schema during ingestion.
+
+  - id: aoi_split_geometry
+    role: split_definition
+    enabled: true
+    type: vector
+    format: geojson_or_geopackage
+    provider: project_curated
+    access:
+      method: local_project_files
+      auth_required: false
+    local:
+      expected_root: data/raw/aoi/
+    notes:
+      - Geographic hold-out split definitions.
+
+  - id: hard_negatives_seed
+    role: hard_negative_labels
+    enabled: true
+    type: vector
+    format: geojson_or_geopackage
+    provider: project_curated
+    access:
+      method: manual_curation_or_scripted_assembly
+      auth_required: false
+    local:
+      expected_path: data/raw/labels/hard_negatives.gpkg
+    notes:
+      - Seed negative set for false-positive control.
+      - Should include wetlands, ponds, oxbows, and similar morphologies.
+
+  - id: nc_lidar_1m_validation
+    role: validation_terrain
+    enabled: true
+    type: raster_dem
+    format: geotiff_or_cloud_optimized_geotiff
+    provider: opentopography
+    access:
+      method: local_assets_or_scripted_fetch
+      auth_required: false
+    local:
+      expected_root: data/raw/dem/nc_1m_validation/
+    notes:
+      - Validation-grade terrain where available.
+      - Use for QA, label checking, and limited high-resolution evaluation.
+
+  - id: copernicus_dem_30m_fallback
+    role: fallback_terrain
+    enabled: true
+    type: raster_dem
+    format: geotiff_or_cloud_optimized_geotiff
+    provider: copernicus
+    access:
+      method: local_assets_or_scripted_fetch
+      auth_required: false
+    local:
+      expected_root: data/raw/dem/copernicus_30m/
+    notes:
+      - Fallback terrain source.
+      - Use for transfer and resolution-sensitivity comparisons.
+
+  - id: sentinel2_sr
+    role: auxiliary_optical_context
+    enabled: true
+    type: raster_multispectral
+    format: geotiff_or_stac_assets
+    provider: copernicus_or_prepared_local_assets
+    access:
+      method: stac_or_prepared_local_assets
+      auth_required: false
+    local:
+      expected_root: data/raw/imagery/sentinel2/
+    bands:
+      - B02
+      - B03
+      - B04
+      - B08
+      - B11
+      - B12
+    notes:
+      - Secondary optical modality.
+      - Not required for the first terrain-only baseline.
+      - Use for auxiliary features and later ablations.
+
+  - id: wetlands
+    role: hard_negative_context
+    enabled: true
+    type: vector
+    format: geojson_or_geopackage
+    provider: external_reference_dataset
+    access:
+      method: manual_export_or_scripted_fetch
+      auth_required: false
+    local:
+      expected_path: data/raw/context/wetlands.gpkg
+    notes:
+      - Recommended context for false-positive suppression.
+
+  - id: landcover
+    role: optional_context
+    enabled: true
+    type: raster_or_vector
+    format: geotiff_or_geopackage
+    provider: external_reference_dataset
+    access:
+      method: scripted_fetch_or_local_assets
+      auth_required: false
+    local:
+      expected_path: data/raw/context/landcover.tif
+    notes:
+      - Optional context for masking and stratification.
+
+  - id: hydrology
+    role: optional_context
+    enabled: true
+    type: vector_or_raster
+    format: geopackage_or_geotiff
+    provider: external_reference_dataset
+    access:
+      method: scripted_fetch_or_local_assets
+      auth_required: false
+    local:
+      expected_path: data/raw/context/hydrology.gpkg
+    notes:
+      - Optional context for filtering hydrological false positives.
+
+defaults:
+  crs: EPSG:4326
+  cache_dir: data/cache
+  normalized_dir: data/interim
+  processed_dir: data/processed
+
+requirements:
+  primary_terrain_source: nc_dem_10m_opentopography
+  positive_labels_source: carolina_bays_labels
+  split_source: aoi_split_geometry
+  negative_seed_source: hard_negatives_seed
+
+optional_sources:
+  - nc_lidar_1m_validation
+  - copernicus_dem_30m_fallback
+  - sentinel2_sr
+  - wetlands
+  - landcover
+  - hydrology
+
+non_goals:
+  - optical_only_primary_baseline
+  - commercial_imagery_as_default
+  - sar_required_in_baseline
+  - geology_layers_required_in_first_pass
+  - segmentation_first_as_only_mvp
+

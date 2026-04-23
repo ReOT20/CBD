@@ -1,0 +1,67 @@
+version: 2
+
+project:
+  name: carolina-bays-real-data-smoke
+  mode: dem_first_smoke
+  objective: first_small_real_data_integration_run
+
+sources:
+  - id: nc_dem_10m_opentopography
+    role: primary_terrain
+    enabled: true
+    type: raster_dem
+    format: geotiff_or_cloud_optimized_geotiff
+    provider: opentopography
+    access:
+      method: local_assets_or_scripted_fetch
+      auth_required: false
+    local:
+      expected_root: data/raw/dem/nc_10m/
+    notes:
+      - Default terrain source for the first small real-data MVP run.
+      - Keep this run terrain-only and small enough for manual review.
+
+  - id: carolina_bays_labels
+    role: primary_labels
+    enabled: true
+    type: vector
+    format: geojson_or_service_export
+    provider: external_reference_dataset
+    access:
+      method: manual_export_or_scripted_fetch
+      auth_required: false
+    local:
+      expected_path: data/raw/labels/carolina_bays.geojson
+    notes:
+      - Raw positive label source.
+      - Normalize a run-specific copy before evaluation.
+
+  - id: wetlands
+    role: hard_negative_context
+    enabled: true
+    type: vector
+    format: geojson_or_geopackage
+    provider: external_reference_dataset
+    access:
+      method: manual_export_or_scripted_fetch
+      auth_required: false
+    local:
+      expected_path: data/raw/context/wetlands.gpkg
+    notes:
+      - Optional secondary context for the first auxiliary-feature pass.
+      - Keep the terrain-only smoke path runnable when this source is absent or unused.
+
+defaults:
+  crs: EPSG:4326
+  normalized_dir: data/interim/real_data_smoke
+  processed_dir: outputs/real_data_smoke
+
+requirements:
+  primary_terrain_source: nc_dem_10m_opentopography
+  positive_labels_source: carolina_bays_labels
+
+non_goals:
+  - auxiliary_optical_features_in_first_real_run
+  - fallback_terrain_comparison_in_first_real_run
+  - high_resolution_validation_terrain_in_first_real_run
+

@@ -58,3 +58,18 @@ Thumbs.db
 .roocode/
 .continue
 .continue/
+
+# Local runtime workspace
+data/*
+!data/.gitkeep
+!data/raw/
+!data/interim/
+!data/cache/
+data/raw/*
+!data/raw/.gitkeep
+data/interim/*
+!data/interim/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+outputs/*
+!outputs/.gitkeep

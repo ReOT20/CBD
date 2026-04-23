@@ -3,9 +3,9 @@ run:
   random_seed: 42
 
 paths:
-  data_manifest: ../manifests/data_manifest.yaml
-  aoi_manifest: ../manifests/aoi_manifest.yaml
-  outputs_root: ../outputs
+  data_manifest: manifests/data_manifest.yaml
+  aoi_manifest: manifests/aoi_manifest.yaml
+  outputs_root: outputs
 
 pipeline:
   enable_wetlands_context: true
