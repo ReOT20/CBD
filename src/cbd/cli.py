@@ -19,11 +19,13 @@ from cbd.data.labels import (
 from cbd.data.terrain import (
     TerrainBaselineEvaluationError,
     TerrainCandidatesError,
+    TerrainContextError,
     TerrainDerivativesError,
     TerrainFinalInventoryError,
     TerrainPreprocessingError,
     TerrainResolutionError,
     TerrainReviewError,
+    derive_context_features,
     derive_terrain_features,
     evaluate_terrain_baseline,
     export_final_inventory,
@@ -529,6 +531,80 @@ def generate_terrain_candidates_command(
 
     console.print(table)
     console.print("[green]Terrain candidate generation completed successfully.[/green]")
+
+
+@app.command("derive-context-features")
+def derive_context_features_command(
+    terrain_candidates_path: Annotated[
+        Path,
+        typer.Argument(help="Path to terrain_candidates_summary.json"),
+    ],
+    data_manifest_path: Annotated[
+        Path,
+        typer.Argument(help="Path to data_manifest.yaml"),
+    ],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root",
+            help=(
+                "Optional context-enriched candidate output root. Defaults to "
+                "outputs/interim/terrain under the project root."
+            ),
+        ),
+    ] = None,
+    context_source_id: Annotated[
+        str,
+        typer.Option(
+            "--context-source-id",
+            help="Enabled vector context source to enrich candidates with.",
+        ),
+    ] = "wetlands",
+) -> None:
+    try:
+        candidates_summary = load_terrain_candidates_summary(terrain_candidates_path)
+        data_manifest = load_data_manifest(data_manifest_path)
+        context_summary = derive_context_features(
+            candidates_summary,
+            data_manifest,
+            data_manifest_path=data_manifest_path,
+            output_root=output_root,
+            context_source_id=context_source_id,
+        )
+        context_summary = context_summary.model_copy(
+            update={
+                "output_summary_path": str(
+                    Path(context_summary.output_root).expanduser().resolve()
+                    / f"terrain_candidates_with_{context_source_id}_summary.json"
+                )
+            }
+        )
+        out = write_terrain_candidates_summary(
+            context_summary,
+            context_summary.output_summary_path,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except ValidationError as exc:
+        console.print("[red]Data manifest validation failed.[/red]")
+        console.print(format_validation_error(exc))
+        raise typer.Exit(code=3) from exc
+    except (TerrainContextError, TerrainReviewError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=4) from exc
+
+    table = Table(title="Terrain context feature summary")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("Project", context_summary.project_name)
+    table.add_row("Context source", context_source_id)
+    table.add_row("Candidate vectors", str(context_summary.total_candidate_vectors_written))
+    table.add_row("Candidates", str(context_summary.total_candidates))
+    table.add_row("Artifact", str(out))
+
+    console.print(table)
+    console.print("[green]Terrain context feature derivation completed successfully.[/green]")
 
 
 @app.command("prepare-terrain-review")

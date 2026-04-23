@@ -296,6 +296,9 @@ def test_prepare_terrain_review_success(tmp_path: Path) -> None:
         rows = list(csv.DictReader(handle))
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == "tile_001__cand_0001"
+    assert rows[0]["wetlands_any_overlap"] == "0"
+    assert rows[0]["wetlands_overlap_area"] == "0.0"
+    assert rows[0]["wetlands_overlap_fraction"] == "0.0"
 
     curated_manifest = json.loads(curated_manifest_path.read_text(encoding="utf-8"))
     assert curated_manifest["total_candidate_rows"] == 1

@@ -25,8 +25,11 @@ def _candidate_record(
     pixel_count: int,
     mean_local_relief: float,
     max_local_relief: float,
+    wetlands_any_overlap: int | None = None,
+    wetlands_overlap_area: float | None = None,
+    wetlands_overlap_fraction: float | None = None,
 ) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "candidate_id": candidate_id,
         "aoi_id": aoi_id,
         "split": split,
@@ -43,6 +46,13 @@ def _candidate_record(
         "mean_slope": mean_local_relief / 2.0,
         "max_slope": max_local_relief / 2.0,
     }
+    if wetlands_any_overlap is not None:
+        record["wetlands_any_overlap"] = wetlands_any_overlap
+    if wetlands_overlap_area is not None:
+        record["wetlands_overlap_area"] = wetlands_overlap_area
+    if wetlands_overlap_fraction is not None:
+        record["wetlands_overlap_fraction"] = wetlands_overlap_fraction
+    return record
 
 
 def _vector_record(
@@ -92,11 +102,14 @@ def _evaluation_row(
     best_negative_iou: float = 0.0,
     is_hard_negative_match: int = 0,
     training_weight: float = 1.0,
+    wetlands_any_overlap: int | None = None,
+    wetlands_overlap_area: float | None = None,
+    wetlands_overlap_fraction: float | None = None,
     target_label: int,
     score: float,
     predicted_label: int,
 ) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "candidate_id": candidate_id,
         "aoi_id": aoi_id,
         "split": split,
@@ -122,6 +135,13 @@ def _evaluation_row(
         "score": score,
         "predicted_label": predicted_label,
     }
+    if wetlands_any_overlap is not None:
+        record["wetlands_any_overlap"] = wetlands_any_overlap
+    if wetlands_overlap_area is not None:
+        record["wetlands_overlap_area"] = wetlands_overlap_area
+    if wetlands_overlap_fraction is not None:
+        record["wetlands_overlap_fraction"] = wetlands_overlap_fraction
+    return record
 
 
 def _write_candidate_vector(path: Path, rows: list[dict[str, object]]) -> None:
@@ -198,6 +218,9 @@ def _write_evaluation_artifact(tmp_path: Path, rows: list[dict[str, object]]) ->
         "max_local_relief",
         "mean_slope",
         "max_slope",
+        "wetlands_any_overlap",
+        "wetlands_overlap_area",
+        "wetlands_overlap_fraction",
         "matched_label_id",
         "best_iou",
         "matched_negative_label_id",
@@ -410,6 +433,9 @@ def test_export_final_inventory_success(tmp_path: Path) -> None:
                 max_local_relief=3.0,
                 matched_label_id="label_train_0001",
                 best_iou=0.9,
+                wetlands_any_overlap=1,
+                wetlands_overlap_area=2.0,
+                wetlands_overlap_fraction=0.1,
                 target_label=1,
                 score=0.91,
                 predicted_label=1,
@@ -460,6 +486,9 @@ def test_export_final_inventory_success(tmp_path: Path) -> None:
     assert float(train_row["score"]) == 0.91
     assert str(train_row["output_vector_path"]) == str(train_vector.resolve())
     assert float(train_row.geometry.area) == 4.0
+    assert int(train_row["wetlands_any_overlap"]) == 1
+    assert float(train_row["wetlands_overlap_area"]) == 2.0
+    assert float(train_row["wetlands_overlap_fraction"]) == 0.1
     assert train_row["matched_negative_label_id"] is None
     assert float(train_row["best_negative_iou"]) == 0.0
     assert int(train_row["is_hard_negative_match"]) == 0
@@ -473,6 +502,9 @@ def test_export_final_inventory_success(tmp_path: Path) -> None:
     ]
     assert "train_source__cand_0002" not in {row["candidate_id"] for row in rows}
     val_row = next(row for row in rows if row["candidate_id"] == "val_source__cand_0001")
+    assert val_row["wetlands_any_overlap"] == "0"
+    assert val_row["wetlands_overlap_area"] == "0.0"
+    assert val_row["wetlands_overlap_fraction"] == "0.0"
     assert val_row["matched_negative_label_id"] == ""
     assert val_row["best_negative_iou"] == "0.0"
     assert val_row["is_hard_negative_match"] == "0"

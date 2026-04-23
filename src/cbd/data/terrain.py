@@ -65,6 +65,10 @@ class TerrainReviewError(ValueError):
     pass
 
 
+class TerrainContextError(ValueError):
+    pass
+
+
 class TerrainBaselineEvaluationError(ValueError):
     pass
 
@@ -187,6 +191,9 @@ class TerrainCandidateRecord(BaseModel):
     max_local_relief: float
     mean_slope: float
     max_slope: float
+    wetlands_any_overlap: int = 0
+    wetlands_overlap_area: float = 0.0
+    wetlands_overlap_fraction: float = 0.0
 
 
 class CandidateVectorArtifactRecord(BaseModel):
@@ -212,6 +219,7 @@ class TerrainCandidatesSummary(BaseModel):
     min_pixels: int
     vectors: list[CandidateVectorArtifactRecord]
     records: list[TerrainCandidateRecord]
+    context_source_id: str | None = None
 
 
 class ReviewTableArtifactRecord(BaseModel):
@@ -280,6 +288,9 @@ class TerrainBaselineRowRecord(BaseModel):
     max_local_relief: float
     mean_slope: float
     max_slope: float
+    wetlands_any_overlap: int = 0
+    wetlands_overlap_area: float = 0.0
+    wetlands_overlap_fraction: float = 0.0
     matched_label_id: str | None = None
     best_iou: float = 0.0
     matched_negative_label_id: str | None = None
@@ -345,6 +356,9 @@ class FinalInventoryFeatureRecord(BaseModel):
     max_local_relief: float
     mean_slope: float
     max_slope: float
+    wetlands_any_overlap: int = 0
+    wetlands_overlap_area: float = 0.0
+    wetlands_overlap_fraction: float = 0.0
     matched_label_id: str | None = None
     best_iou: float = 0.0
     matched_negative_label_id: str | None = None
@@ -387,6 +401,16 @@ CURATED_REVIEW_SORT_POLICY = (
 CURATED_REVIEW_LARGE_CANDIDATE_MIN_PIXELS = 16
 BASELINE_CLASSIFICATION_THRESHOLD = 0.5
 BASELINE_RANDOM_STATE = 42
+WETLANDS_CONTEXT_FEATURE_COLUMNS = [
+    "wetlands_any_overlap",
+    "wetlands_overlap_area",
+    "wetlands_overlap_fraction",
+]
+WETLANDS_CONTEXT_DEFAULTS: dict[str, int | float] = {
+    "wetlands_any_overlap": 0,
+    "wetlands_overlap_area": 0.0,
+    "wetlands_overlap_fraction": 0.0,
+}
 
 
 def infer_project_root(manifest_path: str | Path, project_root: str | Path | None = None) -> Path:
@@ -622,6 +646,67 @@ def load_terrain_candidates_summary(path: str | Path) -> TerrainCandidatesSummar
         raise TerrainReviewError(
             f"Failed to parse terrain candidates artifact: {artifact_path}"
         ) from exc
+
+
+def _load_context_source_frame(
+    data_manifest: DataManifest,
+    *,
+    data_manifest_path: str | Path,
+    project_root: str | Path,
+    context_source_id: str,
+) -> tuple[gpd.GeoDataFrame, Path]:
+    manifest_project_root = infer_project_root(data_manifest_path)
+    candidate_project_root = Path(project_root).expanduser().resolve()
+    if manifest_project_root != candidate_project_root:
+        raise TerrainContextError(
+            "Data manifest and terrain candidates artifact must resolve to the same project root "
+            f"for context enrichment. manifest_root={manifest_project_root}, "
+            f"candidate_root={candidate_project_root}."
+        )
+
+    source = next(
+        (candidate for candidate in data_manifest.sources if candidate.id == context_source_id),
+        None,
+    )
+    if source is None:
+        raise TerrainContextError(
+            f"Context source '{context_source_id}' is not declared in the data manifest."
+        )
+    if not source.enabled:
+        raise TerrainContextError(
+            f"Context source '{context_source_id}' is disabled in the data manifest."
+        )
+    if source.type not in {"vector", "vector_or_raster", "raster_or_vector"}:
+        raise TerrainContextError(
+            f"Context source '{context_source_id}' must be a vector source, got type={source.type}."
+        )
+    if not source.local.expected_path:
+        raise TerrainContextError(
+            f"Context source '{context_source_id}' must declare local.expected_path."
+        )
+
+    context_path = resolve_manifest_path(candidate_project_root, source.local.expected_path)
+    if not context_path.exists():
+        raise TerrainContextError(
+            f"Context source path not found for '{context_source_id}': {context_path}"
+        )
+
+    try:
+        gdf = read_vector(context_path)
+    except Exception as exc:
+        raise TerrainContextError(
+            f"Context source could not be read for '{context_source_id}': {context_path}"
+        ) from exc
+    gdf = clean_geometries(gdf)
+    if gdf.empty:
+        raise TerrainContextError(
+            f"Context source is empty after cleaning for '{context_source_id}': {context_path}"
+        )
+    if gdf.crs is None:
+        raise TerrainContextError(
+            f"Context source has no CRS for '{context_source_id}': {context_path}"
+        )
+    return gpd.GeoDataFrame(gdf, geometry="geometry", crs=gdf.crs), context_path
 
 
 def load_terrain_baseline_evaluation_summary(
@@ -1153,6 +1238,9 @@ def _empty_candidate_gdf(crs: Any) -> gpd.GeoDataFrame:
             "max_local_relief": np.array([], dtype=np.float64),
             "mean_slope": np.array([], dtype=np.float64),
             "max_slope": np.array([], dtype=np.float64),
+            "wetlands_any_overlap": np.array([], dtype=np.int32),
+            "wetlands_overlap_area": np.array([], dtype=np.float64),
+            "wetlands_overlap_fraction": np.array([], dtype=np.float64),
             "geometry": gpd.GeoSeries([], crs=crs),
         },
         geometry="geometry",
@@ -1249,6 +1337,25 @@ def _validate_reviewed_hard_negative_weight(weight: float) -> None:
         )
 
 
+def _ensure_wetlands_context_columns(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = df.copy()
+    for column, default_value in WETLANDS_CONTEXT_DEFAULTS.items():
+        if column not in normalized.columns:
+            normalized[column] = default_value
+
+    try:
+        normalized["wetlands_any_overlap"] = normalized["wetlands_any_overlap"].astype(int)
+        normalized["wetlands_overlap_area"] = normalized["wetlands_overlap_area"].astype(float)
+        normalized["wetlands_overlap_fraction"] = normalized[
+            "wetlands_overlap_fraction"
+        ].astype(float)
+    except ValueError as exc:
+        raise TerrainBaselineEvaluationError(
+            "Candidate context feature columns contain invalid numeric values."
+        ) from exc
+    return normalized
+
+
 def _load_normalized_labels(labels_path: str | Path) -> gpd.GeoDataFrame:
     gdf = read_vector(labels_path)
     gdf = clean_geometries(gdf)
@@ -1315,6 +1422,11 @@ def _load_candidate_geometries(
             raise TerrainBaselineEvaluationError(
                 f"Candidate vector has no CRS: {candidate_vector_path}"
             )
+        gdf = gpd.GeoDataFrame(
+            _ensure_wetlands_context_columns(gdf),
+            geometry="geometry",
+            crs=gdf.crs,
+        )
         try:
             normalized_splits = validate_split_values(
                 gdf["split"].tolist(),
@@ -1336,6 +1448,9 @@ def _load_candidate_geometries(
                 "terrain_source_id": [],
                 "source_raster_stem": [],
                 "output_vector_path": [],
+                "wetlands_any_overlap": [],
+                "wetlands_overlap_area": [],
+                "wetlands_overlap_fraction": [],
             },
             geometry=gpd.GeoSeries([], crs=None),
             crs=None,
@@ -1417,6 +1532,15 @@ def _load_baseline_rows(
     normalized["output_vector_path"] = normalized["output_vector_path"].astype(str)
     _normalize_optional_text_column(normalized, "matched_label_id")
     _normalize_optional_text_column(normalized, "matched_negative_label_id")
+    for column, default_value in WETLANDS_CONTEXT_DEFAULTS.items():
+        if column not in normalized.columns:
+            normalized[column] = default_value
+        normalized[column] = cast(
+            pd.Series,
+            pd.to_numeric(normalized[column], errors="coerce"),
+        ).fillna(
+            default_value
+        )
     try:
         normalized["split"] = validate_split_values(
             normalized["split"].tolist(),
@@ -1425,7 +1549,13 @@ def _load_baseline_rows(
     except ValueError as exc:
         raise TerrainFinalInventoryError(str(exc)) from exc
 
-    int_columns = ["pixel_count", "is_hard_negative_match", "target_label", "predicted_label"]
+    int_columns = [
+        "pixel_count",
+        "wetlands_any_overlap",
+        "is_hard_negative_match",
+        "target_label",
+        "predicted_label",
+    ]
     float_columns = [
         "area_map_units",
         "bbox_width",
@@ -1435,6 +1565,8 @@ def _load_baseline_rows(
         "max_local_relief",
         "mean_slope",
         "max_slope",
+        "wetlands_overlap_area",
+        "wetlands_overlap_fraction",
         "best_iou",
         "best_negative_iou",
         "score",
@@ -1455,12 +1587,12 @@ def _load_baseline_rows(
 def _candidate_feature_frame(
     terrain_candidates_summary: TerrainCandidatesSummary,
 ) -> pd.DataFrame:
-    return pd.DataFrame(
+    return _ensure_wetlands_context_columns(pd.DataFrame(
         [
             record.model_dump()
             for record in terrain_candidates_summary.records
         ]
-    )
+    ))
 
 
 def _best_label_match(
@@ -1710,6 +1842,164 @@ def write_terrain_candidates_summary(
     return path
 
 
+def derive_context_features(
+    terrain_candidates_summary: TerrainCandidatesSummary,
+    data_manifest: DataManifest,
+    *,
+    data_manifest_path: str | Path,
+    output_root: str | Path | None = None,
+    context_source_id: str = "wetlands",
+) -> TerrainCandidatesSummary:
+    project_root = Path(terrain_candidates_summary.project_root).expanduser().resolve()
+    context_root = (
+        _default_candidates_root(project_root)
+        if output_root is None
+        else Path(output_root).expanduser().resolve()
+    )
+    summary_path = context_root / f"terrain_candidates_with_{context_source_id}_summary.json"
+
+    context_gdf, _ = _load_context_source_frame(
+        data_manifest,
+        data_manifest_path=data_manifest_path,
+        project_root=project_root,
+        context_source_id=context_source_id,
+    )
+
+    vector_records: list[CandidateVectorArtifactRecord] = []
+    candidate_records: list[TerrainCandidateRecord] = []
+
+    context_unions_by_crs: dict[str, BaseGeometry] = {}
+
+    for vector_record in terrain_candidates_summary.vectors:
+        candidate_vector_path = Path(vector_record.candidate_vector_path).expanduser().resolve()
+        if not candidate_vector_path.exists():
+            raise TerrainContextError(
+                f"Candidate vector path not found for context enrichment: {candidate_vector_path}"
+            )
+        try:
+            gdf = gpd.read_file(candidate_vector_path)
+        except Exception as exc:
+            raise TerrainContextError(
+                "Candidate vector could not be read for context enrichment: "
+                f"{candidate_vector_path}"
+            ) from exc
+
+        enriched = gpd.GeoDataFrame(gdf, geometry="geometry", crs=gdf.crs)
+        if enriched.crs is None:
+            raise TerrainContextError(
+                f"Candidate vector has no CRS for context enrichment: {candidate_vector_path}"
+            )
+        enriched = gpd.GeoDataFrame(
+            _ensure_wetlands_context_columns(enriched),
+            geometry="geometry",
+            crs=enriched.crs,
+        )
+
+        enriched_crs = enriched.crs
+        if enriched_crs is None:
+            raise TerrainContextError(
+                f"Candidate vector has no CRS for context enrichment: {candidate_vector_path}"
+            )
+        crs_key = str(enriched_crs)
+        context_union = context_unions_by_crs.get(crs_key)
+        if context_union is None:
+            reprojected_context = context_gdf.to_crs(enriched_crs)
+            context_union = cast(BaseGeometry, unary_union(list(reprojected_context.geometry)))
+            context_unions_by_crs[crs_key] = context_union
+
+        overlap_areas: list[float] = []
+        overlap_fractions: list[float] = []
+        any_overlaps: list[int] = []
+        for geometry in cast(list[BaseGeometry], enriched.geometry.tolist()):
+            if (
+                context_union.is_empty
+                or geometry.is_empty
+                or not geometry.intersects(context_union)
+            ):
+                overlap_area = 0.0
+            else:
+                overlap_area = float(geometry.intersection(context_union).area)
+            candidate_area = float(geometry.area)
+            overlap_fraction = overlap_area / candidate_area if candidate_area > 0.0 else 0.0
+            overlap_areas.append(overlap_area)
+            overlap_fractions.append(overlap_fraction)
+            any_overlaps.append(1 if overlap_area > 0.0 else 0)
+
+        enriched["wetlands_any_overlap"] = any_overlaps
+        enriched["wetlands_overlap_area"] = overlap_areas
+        enriched["wetlands_overlap_fraction"] = overlap_fractions
+
+        output_vector_path = (
+            context_root
+            / "context_candidates"
+            / context_source_id
+            / vector_record.aoi_id
+            / vector_record.terrain_source_id
+            / f"{vector_record.source_raster_stem}__candidates.geojson"
+        )
+        _write_candidate_vector(enriched, output_vector_path)
+        vector_records.append(
+            CandidateVectorArtifactRecord(
+                aoi_id=vector_record.aoi_id,
+                split=vector_record.split,
+                terrain_source_id=vector_record.terrain_source_id,
+                source_raster_stem=vector_record.source_raster_stem,
+                input_raster_path=vector_record.input_raster_path,
+                candidate_vector_path=str(output_vector_path),
+                candidate_count=len(enriched),
+            )
+        )
+        for row in _dataframe_record_rows(pd.DataFrame(enriched.drop(columns="geometry"))):
+            candidate_records.append(
+                TerrainCandidateRecord(
+                    candidate_id=cast(str, row["candidate_id"]),
+                    aoi_id=cast(str, row["aoi_id"]),
+                    split=cast(str, row["split"]),
+                    terrain_source_id=cast(str, row["terrain_source_id"]),
+                    source_raster_stem=cast(str, row["source_raster_stem"]),
+                    output_vector_path=str(output_vector_path),
+                    pixel_count=int(cast(int | float | str, row["pixel_count"])),
+                    area_map_units=float(cast(int | float | str, row["area_map_units"])),
+                    bbox_width=float(cast(int | float | str, row["bbox_width"])),
+                    bbox_height=float(cast(int | float | str, row["bbox_height"])),
+                    bbox_aspect_ratio=float(
+                        cast(int | float | str, row["bbox_aspect_ratio"])
+                    ),
+                    mean_local_relief=float(
+                        cast(int | float | str, row["mean_local_relief"])
+                    ),
+                    max_local_relief=float(cast(int | float | str, row["max_local_relief"])),
+                    mean_slope=float(cast(int | float | str, row["mean_slope"])),
+                    max_slope=float(cast(int | float | str, row["max_slope"])),
+                    wetlands_any_overlap=int(
+                        cast(int | float | str, row["wetlands_any_overlap"])
+                    ),
+                    wetlands_overlap_area=float(
+                        cast(int | float | str, row["wetlands_overlap_area"])
+                    ),
+                    wetlands_overlap_fraction=float(
+                        cast(int | float | str, row["wetlands_overlap_fraction"])
+                    ),
+                )
+            )
+
+    return TerrainCandidatesSummary(
+        project_name=terrain_candidates_summary.project_name,
+        project_root=str(project_root),
+        terrain_derivatives_artifact=terrain_candidates_summary.terrain_derivatives_artifact,
+        output_root=str(context_root),
+        output_summary_path=str(summary_path),
+        total_input_groups_processed=terrain_candidates_summary.total_input_groups_processed,
+        total_candidate_vectors_written=len(vector_records),
+        total_candidates=len(candidate_records),
+        relief_threshold=terrain_candidates_summary.relief_threshold,
+        min_pixels=terrain_candidates_summary.min_pixels,
+        vectors=vector_records,
+        records=candidate_records,
+        context_source_id=context_source_id,
+    )
+
+
 def prepare_terrain_review_artifacts(
     terrain_candidates_summary: TerrainCandidatesSummary,
     *,
@@ -1742,6 +2032,9 @@ def prepare_terrain_review_artifacts(
             "max_local_relief": record.max_local_relief,
             "mean_slope": record.mean_slope,
             "max_slope": record.max_slope,
+            "wetlands_any_overlap": record.wetlands_any_overlap,
+            "wetlands_overlap_area": record.wetlands_overlap_area,
+            "wetlands_overlap_fraction": record.wetlands_overlap_fraction,
         }
         for record in sorted(
             terrain_candidates_summary.records,
@@ -1769,6 +2062,9 @@ def prepare_terrain_review_artifacts(
         "max_local_relief",
         "mean_slope",
         "max_slope",
+        "wetlands_any_overlap",
+        "wetlands_overlap_area",
+        "wetlands_overlap_fraction",
     ]
 
     table_records: list[ReviewTableArtifactRecord] = []
@@ -2124,6 +2420,7 @@ def evaluate_terrain_baseline(
         "max_local_relief",
         "mean_slope",
         "max_slope",
+        *WETLANDS_CONTEXT_FEATURE_COLUMNS,
     ]
     model = LogisticRegression(
         random_state=BASELINE_RANDOM_STATE,
@@ -2158,6 +2455,9 @@ def evaluate_terrain_baseline(
         "max_local_relief",
         "mean_slope",
         "max_slope",
+        "wetlands_any_overlap",
+        "wetlands_overlap_area",
+        "wetlands_overlap_fraction",
         "matched_label_id",
         "best_iou",
         "matched_negative_label_id",
@@ -2365,6 +2665,9 @@ def export_final_inventory(
         "max_local_relief",
         "mean_slope",
         "max_slope",
+        "wetlands_any_overlap",
+        "wetlands_overlap_area",
+        "wetlands_overlap_fraction",
         "matched_label_id",
         "best_iou",
         "matched_negative_label_id",

@@ -15,6 +15,7 @@ paths:
 pipeline:
   terrain_source_id: nc_dem_10m_opentopography
   enable_wetlands_context: false
+  context_source_id: wetlands
   export_debug_artifacts: true
   geometry_holdout: true
   include_auxiliary_layers: false

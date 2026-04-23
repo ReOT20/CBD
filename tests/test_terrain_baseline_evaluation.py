@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import geopandas as gpd
@@ -26,8 +26,11 @@ def _candidate_record(
     pixel_count: int,
     mean_local_relief: float,
     max_local_relief: float,
+    wetlands_any_overlap: int | None = None,
+    wetlands_overlap_area: float | None = None,
+    wetlands_overlap_fraction: float | None = None,
 ) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "candidate_id": candidate_id,
         "aoi_id": aoi_id,
         "split": split,
@@ -44,6 +47,13 @@ def _candidate_record(
         "mean_slope": mean_local_relief / 2.0,
         "max_slope": max_local_relief / 2.0,
     }
+    if wetlands_any_overlap is not None:
+        record["wetlands_any_overlap"] = wetlands_any_overlap
+    if wetlands_overlap_area is not None:
+        record["wetlands_overlap_area"] = wetlands_overlap_area
+    if wetlands_overlap_fraction is not None:
+        record["wetlands_overlap_fraction"] = wetlands_overlap_fraction
+    return record
 
 
 def _vector_record(
@@ -366,6 +376,9 @@ def test_evaluate_terrain_baseline_success(tmp_path: Path) -> None:
     assert train_positive["matched_negative_label_id"] == ""
     assert train_positive["best_negative_iou"] == "0.0"
     assert train_positive["is_hard_negative_match"] == "0"
+    assert train_positive["wetlands_any_overlap"] == "0"
+    assert train_positive["wetlands_overlap_area"] == "0.0"
+    assert train_positive["wetlands_overlap_fraction"] == "0.0"
     assert val_positive["target_label"] == "1"
     assert val_positive["matched_label_id"] == "label_val_000001"
     assert val_positive["matched_negative_label_id"] == ""
@@ -961,6 +974,179 @@ def test_evaluate_terrain_baseline_passes_reviewed_hard_negative_sample_weight(
     )
     metrics_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
     assert metrics_payload["reviewed_hard_negative_weight"] == 5.0
+
+
+def test_evaluate_terrain_baseline_uses_wetlands_context_features_when_present(
+    tmp_path: Path,
+) -> None:
+    train_pos_vector = (
+        tmp_path / "outputs" / "interim" / "terrain" / "candidates" / "train_aoi_01"
+        / "nc_dem_10m_opentopography" / "train_pos__candidates.geojson"
+    )
+    train_neg_vector = train_pos_vector.with_name("train_neg__candidates.geojson")
+    val_pos_vector = train_pos_vector.with_name("val_pos__candidates.geojson")
+
+    _write_candidate_vector(
+        train_pos_vector,
+        candidate_id="train_pos__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_pos",
+        geometry=Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+        pixel_count=20,
+        mean_local_relief=2.5,
+        max_local_relief=3.0,
+    )
+    _write_candidate_vector(
+        train_neg_vector,
+        candidate_id="train_neg__cand_0001",
+        aoi_id="train_aoi_01",
+        split="train",
+        source_raster_stem="train_neg",
+        geometry=Polygon([(5, 5), (7, 5), (7, 7), (5, 7)]),
+        pixel_count=8,
+        mean_local_relief=0.8,
+        max_local_relief=1.0,
+    )
+    _write_candidate_vector(
+        val_pos_vector,
+        candidate_id="val_pos__cand_0001",
+        aoi_id="val_aoi_01",
+        split="val",
+        source_raster_stem="val_pos",
+        geometry=Polygon([(10, 10), (12, 10), (12, 12), (10, 12)]),
+        pixel_count=18,
+        mean_local_relief=2.2,
+        max_local_relief=2.9,
+    )
+
+    artifact_path = _write_candidates_artifact(
+        tmp_path,
+        vectors=[
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                candidate_vector_path=train_pos_vector,
+                candidate_count=1,
+            ),
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_neg",
+                candidate_vector_path=train_neg_vector,
+                candidate_count=1,
+            ),
+            _vector_record(
+                tmp_path=tmp_path,
+                aoi_id="val_aoi_01",
+                split="val",
+                source_raster_stem="val_pos",
+                candidate_vector_path=val_pos_vector,
+                candidate_count=1,
+            ),
+        ],
+        records=[
+            _candidate_record(
+                candidate_id="train_pos__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_pos",
+                output_vector_path=train_pos_vector,
+                pixel_count=20,
+                mean_local_relief=2.5,
+                max_local_relief=3.0,
+                wetlands_any_overlap=0,
+                wetlands_overlap_area=0.0,
+                wetlands_overlap_fraction=0.0,
+            ),
+            _candidate_record(
+                candidate_id="train_neg__cand_0001",
+                aoi_id="train_aoi_01",
+                split="train",
+                source_raster_stem="train_neg",
+                output_vector_path=train_neg_vector,
+                pixel_count=8,
+                mean_local_relief=0.8,
+                max_local_relief=1.0,
+                wetlands_any_overlap=1,
+                wetlands_overlap_area=4.0,
+                wetlands_overlap_fraction=1.0,
+            ),
+            _candidate_record(
+                candidate_id="val_pos__cand_0001",
+                aoi_id="val_aoi_01",
+                split="val",
+                source_raster_stem="val_pos",
+                output_vector_path=val_pos_vector,
+                pixel_count=18,
+                mean_local_relief=2.2,
+                max_local_relief=2.9,
+                wetlands_any_overlap=0,
+                wetlands_overlap_area=0.0,
+                wetlands_overlap_fraction=0.0,
+            ),
+        ],
+    )
+
+    labels_path = tmp_path / "data" / "labels" / "normalized_labels.geojson"
+    _write_normalized_labels(
+        labels_path,
+        [
+            {
+                "label_id": "label_train_000001",
+                "class_name": "positive_complete",
+                "source_id": "carolina_bays_labels",
+                "split": "train",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+            },
+            {
+                "label_id": "label_val_000001",
+                "class_name": "positive_complete",
+                "source_id": "carolina_bays_labels",
+                "split": "val",
+                "review_status": "seed",
+                "notes": "",
+                "geometry": Polygon([(10, 10), (12, 10), (12, 12), (10, 12)]),
+            },
+        ],
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeLogisticRegression:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured["init_kwargs"] = kwargs
+
+        def fit(self, x: Any, y: Any, sample_weight: Any = None) -> FakeLogisticRegression:
+            captured["columns"] = list(x.columns)
+            captured["wetlands_any_overlap"] = list(x["wetlands_any_overlap"])
+            captured["wetlands_overlap_area"] = list(x["wetlands_overlap_area"])
+            captured["wetlands_overlap_fraction"] = list(x["wetlands_overlap_fraction"])
+            return self
+
+        def predict_proba(self, x: Any) -> np.ndarray:
+            return np.tile(np.array([[0.9, 0.1]]), (len(x), 1))
+
+    with patch("cbd.data.terrain.LogisticRegression", FakeLogisticRegression):
+        result = runner.invoke(
+            app,
+            ["evaluate-terrain-baseline", str(artifact_path), str(labels_path)],
+        )
+
+    assert result.exit_code == 0
+    assert cast(list[str], captured["columns"])[-3:] == [
+        "wetlands_any_overlap",
+        "wetlands_overlap_area",
+        "wetlands_overlap_fraction",
+    ]
+    assert captured["wetlands_any_overlap"] == [0, 1]
+    assert captured["wetlands_overlap_area"] == [0.0, 4.0]
+    assert captured["wetlands_overlap_fraction"] == [0.0, 1.0]
 
 
 def test_evaluate_terrain_baseline_fails_for_conflicting_positive_and_hard_negative_matches(
