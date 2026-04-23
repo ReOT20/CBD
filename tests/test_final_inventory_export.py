@@ -91,6 +91,7 @@ def _evaluation_row(
     matched_negative_label_id: str | None = None,
     best_negative_iou: float = 0.0,
     is_hard_negative_match: int = 0,
+    training_weight: float = 1.0,
     target_label: int,
     score: float,
     predicted_label: int,
@@ -116,6 +117,7 @@ def _evaluation_row(
         "matched_negative_label_id": matched_negative_label_id,
         "best_negative_iou": best_negative_iou,
         "is_hard_negative_match": is_hard_negative_match,
+        "training_weight": training_weight,
         "target_label": target_label,
         "score": score,
         "predicted_label": predicted_label,
@@ -201,6 +203,7 @@ def _write_evaluation_artifact(tmp_path: Path, rows: list[dict[str, object]]) ->
         "matched_negative_label_id",
         "best_negative_iou",
         "is_hard_negative_match",
+        "training_weight",
         "target_label",
         "score",
         "predicted_label",
@@ -216,6 +219,7 @@ def _write_evaluation_artifact(tmp_path: Path, rows: list[dict[str, object]]) ->
         json.dumps(
             {
                 "threshold": 0.5,
+                "reviewed_hard_negative_weight": 3.0,
                 "train_row_count": sum(1 for row in rows if row["split"] != "val"),
                 "val_row_count": sum(1 for row in rows if row["split"] == "val"),
                 "train_positive_count": 1,

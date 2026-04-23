@@ -618,6 +618,16 @@ def evaluate_terrain_baseline_command(
             help="Minimum same-split candidate-to-label IoU used to assign positive targets.",
         ),
     ] = 0.10,
+    reviewed_hard_negative_weight: Annotated[
+        float,
+        typer.Option(
+            "--reviewed-hard-negative-weight",
+            help=(
+                "Sample weight applied during training to train rows matched to "
+                "reviewed hard-negative labels."
+            ),
+        ),
+    ] = 3.0,
 ) -> None:
     try:
         candidates_summary = load_terrain_candidates_summary(terrain_candidates_path)
@@ -626,6 +636,7 @@ def evaluate_terrain_baseline_command(
             normalized_labels_path=normalized_labels_path,
             output_root=output_root,
             match_iou=match_iou,
+            reviewed_hard_negative_weight=reviewed_hard_negative_weight,
         )
         evaluation_summary = evaluation_summary.model_copy(
             update={

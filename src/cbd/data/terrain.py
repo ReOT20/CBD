@@ -280,6 +280,7 @@ class TerrainBaselineRowRecord(BaseModel):
     matched_negative_label_id: str | None = None
     best_negative_iou: float = 0.0
     is_hard_negative_match: int
+    training_weight: float
     target_label: int
     score: float
     predicted_label: int
@@ -294,6 +295,7 @@ class TerrainBaselinePredictionArtifactRecord(BaseModel):
 
 class TerrainBaselineMetrics(BaseModel):
     threshold: float
+    reviewed_hard_negative_weight: float
     train_row_count: int
     val_row_count: int
     train_positive_count: int
@@ -1227,6 +1229,14 @@ def _validate_match_iou_threshold(match_iou: float) -> None:
         )
 
 
+def _validate_reviewed_hard_negative_weight(weight: float) -> None:
+    if weight <= 0.0:
+        raise TerrainBaselineEvaluationError(
+            "Reviewed hard-negative weight must be greater than 0, "
+            f"got {weight}."
+        )
+
+
 def _load_normalized_labels(labels_path: str | Path) -> gpd.GeoDataFrame:
     gdf = read_vector(labels_path)
     gdf = clean_geometries(gdf)
@@ -1905,8 +1915,10 @@ def evaluate_terrain_baseline(
     normalized_labels_path: str | Path,
     output_root: str | Path | None = None,
     match_iou: float = 0.10,
+    reviewed_hard_negative_weight: float = 3.0,
 ) -> TerrainBaselineEvaluationSummary:
     _validate_match_iou_threshold(match_iou)
+    _validate_reviewed_hard_negative_weight(reviewed_hard_negative_weight)
 
     project_root = Path(terrain_candidates_summary.project_root).expanduser().resolve()
     evaluation_root = (
@@ -2028,6 +2040,11 @@ def evaluate_terrain_baseline(
 
     train_mask = candidate_rows["split"] != "val"
     val_mask = candidate_rows["split"] == "val"
+    candidate_rows["training_weight"] = 1.0
+    candidate_rows.loc[
+        train_mask & (candidate_rows["is_hard_negative_match"] == 1),
+        "training_weight",
+    ] = reviewed_hard_negative_weight
     train_rows = candidate_rows.loc[train_mask].copy()
     val_rows = candidate_rows.loc[val_mask].copy()
 
@@ -2057,7 +2074,11 @@ def evaluate_terrain_baseline(
         max_iter=1000,
         class_weight=None,
     )
-    model.fit(train_rows[feature_columns], train_rows["target_label"])
+    model.fit(
+        train_rows[feature_columns],
+        train_rows["target_label"],
+        sample_weight=train_rows["training_weight"],
+    )
 
     scores = model.predict_proba(candidate_rows[feature_columns])[:, 1]
     candidate_rows["score"] = scores
@@ -2086,6 +2107,7 @@ def evaluate_terrain_baseline(
         "matched_negative_label_id",
         "best_negative_iou",
         "is_hard_negative_match",
+        "training_weight",
         "target_label",
         "score",
         "predicted_label",
@@ -2142,6 +2164,7 @@ def evaluate_terrain_baseline(
 
     metrics = TerrainBaselineMetrics(
         threshold=BASELINE_CLASSIFICATION_THRESHOLD,
+        reviewed_hard_negative_weight=reviewed_hard_negative_weight,
         train_row_count=len(train_rows),
         val_row_count=len(val_rows),
         train_positive_count=int(train_rows["target_label"].sum()),
