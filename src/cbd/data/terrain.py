@@ -63,6 +63,10 @@ class TerrainBaselineEvaluationError(ValueError):
     pass
 
 
+class TerrainFinalInventoryError(ValueError):
+    pass
+
+
 class ResolvedTerrainSource(BaseModel):
     id: str
     role: str
@@ -314,6 +318,54 @@ class TerrainBaselineEvaluationSummary(BaseModel):
     metrics: TerrainBaselineMetrics
 
 
+class FinalInventoryFeatureRecord(BaseModel):
+    candidate_id: str
+    aoi_id: str
+    split: str
+    terrain_source_id: str
+    source_raster_stem: str
+    output_vector_path: str
+    pixel_count: int
+    area_map_units: float
+    bbox_width: float
+    bbox_height: float
+    bbox_aspect_ratio: float
+    mean_local_relief: float
+    max_local_relief: float
+    mean_slope: float
+    max_slope: float
+    matched_label_id: str | None = None
+    best_iou: float = 0.0
+    target_label: int
+    score: float
+    predicted_label: int
+
+
+class FinalInventoryArtifactRecord(BaseModel):
+    artifact_kind: Literal["geojson", "csv"]
+    output_path: str
+    row_count: int
+
+
+class TerrainFinalInventorySummary(BaseModel):
+    project_name: str
+    project_root: str
+    terrain_baseline_evaluation_artifact: str
+    terrain_candidates_artifact: str
+    output_root: str
+    output_summary_path: str
+    geojson_output_path: str
+    csv_output_path: str
+    total_exported_features: int
+    split_counts: dict[str, int]
+    predicted_positive_count: int
+    predicted_negative_count: int
+    classification_threshold: float
+    match_iou_threshold: float
+    artifacts: list[FinalInventoryArtifactRecord]
+    records: list[FinalInventoryFeatureRecord]
+
+
 DERIVATIVE_OUTPUT_NODATA = -9999.0
 CURATED_REVIEW_SORT_POLICY = (
     "max_local_relief_desc__mean_local_relief_desc__pixel_count_desc__candidate_id_asc"
@@ -551,6 +603,24 @@ def load_terrain_candidates_summary(path: str | Path) -> TerrainCandidatesSummar
         ) from exc
 
 
+def load_terrain_baseline_evaluation_summary(
+    path: str | Path,
+) -> TerrainBaselineEvaluationSummary:
+    artifact_path = Path(path).expanduser().resolve()
+    if not artifact_path.exists():
+        raise FileNotFoundError(
+            f"Terrain baseline evaluation artifact not found: {artifact_path}"
+        )
+    try:
+        return TerrainBaselineEvaluationSummary.model_validate_json(
+            artifact_path.read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise TerrainFinalInventoryError(
+            f"Failed to parse terrain baseline evaluation artifact: {artifact_path}"
+        ) from exc
+
+
 def _load_clip_geometry(geometry_path: str | Path) -> tuple[BaseGeometry, str]:
     gdf = read_vector(geometry_path)
     gdf = clean_geometries(gdf)
@@ -597,6 +667,10 @@ def _default_evaluation_root(project_root: str | Path) -> Path:
         / "terrain"
         / "evaluation"
     )
+
+
+def _default_final_inventory_root(project_root: str | Path) -> Path:
+    return Path(project_root).expanduser().resolve() / "outputs" / "final" / "terrain"
 
 
 def _validate_relief_window_size(relief_window_size: int) -> None:
@@ -1205,6 +1279,86 @@ def _load_candidate_geometries(
         geometry="geometry",
         crs=frames[0].crs,
     )
+
+
+def _load_baseline_rows(
+    evaluation_summary: TerrainBaselineEvaluationSummary,
+) -> pd.DataFrame:
+    rows_path = Path(evaluation_summary.rows_output_path).expanduser().resolve()
+    if not rows_path.exists():
+        raise FileNotFoundError(f"Terrain baseline rows artifact not found: {rows_path}")
+    try:
+        rows = pd.read_csv(rows_path)
+    except Exception as exc:
+        raise TerrainFinalInventoryError(
+            f"Terrain baseline rows artifact could not be read: {rows_path}"
+        ) from exc
+
+    required_columns = {
+        "candidate_id",
+        "aoi_id",
+        "split",
+        "terrain_source_id",
+        "source_raster_stem",
+        "output_vector_path",
+        "pixel_count",
+        "area_map_units",
+        "bbox_width",
+        "bbox_height",
+        "bbox_aspect_ratio",
+        "mean_local_relief",
+        "max_local_relief",
+        "mean_slope",
+        "max_slope",
+        "matched_label_id",
+        "best_iou",
+        "target_label",
+        "score",
+        "predicted_label",
+    }
+    missing_columns = required_columns - set(rows.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise TerrainFinalInventoryError(
+            f"Terrain baseline rows artifact is missing required column(s): {missing}."
+        )
+
+    normalized = rows.copy()
+    normalized["candidate_id"] = normalized["candidate_id"].astype(str)
+    normalized["aoi_id"] = normalized["aoi_id"].astype(str)
+    normalized["split"] = normalized["split"].astype(str)
+    normalized["terrain_source_id"] = normalized["terrain_source_id"].astype(str)
+    normalized["source_raster_stem"] = normalized["source_raster_stem"].astype(str)
+    normalized["output_vector_path"] = normalized["output_vector_path"].astype(str)
+    normalized["matched_label_id"] = normalized["matched_label_id"].where(
+        pd.notna(normalized["matched_label_id"]),
+        None,
+    )
+
+    int_columns = ["pixel_count", "target_label", "predicted_label"]
+    float_columns = [
+        "area_map_units",
+        "bbox_width",
+        "bbox_height",
+        "bbox_aspect_ratio",
+        "mean_local_relief",
+        "max_local_relief",
+        "mean_slope",
+        "max_slope",
+        "best_iou",
+        "score",
+    ]
+    try:
+        for column in int_columns:
+            normalized[column] = normalized[column].astype(int)
+        for column in float_columns:
+            normalized[column] = normalized[column].astype(float)
+    except ValueError as exc:
+        raise TerrainFinalInventoryError(
+            f"Terrain baseline rows artifact has invalid numeric values: {rows_path}"
+        ) from exc
+
+    return normalized
 
 
 def _candidate_feature_frame(
@@ -1939,5 +2093,166 @@ def evaluate_terrain_baseline(
 
 def write_terrain_baseline_evaluation_summary(
     summary: TerrainBaselineEvaluationSummary, output_path: str | Path
+) -> Path:
+    return _write_json_artifact(summary, Path(output_path).expanduser().resolve())
+
+
+def export_final_inventory(
+    terrain_baseline_evaluation_summary: TerrainBaselineEvaluationSummary,
+    terrain_candidates_summary: TerrainCandidatesSummary,
+    *,
+    output_root: str | Path | None = None,
+) -> TerrainFinalInventorySummary:
+    project_root = Path(terrain_candidates_summary.project_root).expanduser().resolve()
+    final_root = (
+        _default_final_inventory_root(project_root)
+        if output_root is None
+        else Path(output_root).expanduser().resolve()
+    )
+    summary_path = final_root / "terrain_final_inventory_summary.json"
+    geojson_path = final_root / "terrain_final_inventory.geojson"
+    csv_path = final_root / "terrain_final_inventory.csv"
+
+    evaluation_project_root = (
+        Path(terrain_baseline_evaluation_summary.project_root).expanduser().resolve()
+    )
+    if evaluation_project_root != project_root:
+        raise TerrainFinalInventoryError(
+            "Terrain baseline evaluation and candidate artifacts must share the same project root."
+        )
+
+    evaluation_rows = _load_baseline_rows(terrain_baseline_evaluation_summary)
+    try:
+        candidate_geometry_gdf = _load_candidate_geometries(terrain_candidates_summary)
+    except (TerrainBaselineEvaluationError, TerrainReviewError) as exc:
+        raise TerrainFinalInventoryError(str(exc)) from exc
+
+    join_columns = [
+        "candidate_id",
+        "aoi_id",
+        "split",
+        "terrain_source_id",
+        "source_raster_stem",
+    ]
+    geometry_columns = join_columns + ["output_vector_path", "geometry"]
+    candidate_geometry_frame = (
+        pd.DataFrame(candidate_geometry_gdf[geometry_columns])
+        if not candidate_geometry_gdf.empty
+        else pd.DataFrame(columns=geometry_columns)
+    )
+
+    merged = evaluation_rows.merge(
+        candidate_geometry_frame,
+        on=join_columns,
+        how="left",
+        suffixes=("_eval", ""),
+        validate="one_to_one",
+    )
+
+    missing_geometry_rows = merged.loc[merged["geometry"].isnull(), join_columns].copy()
+    if not missing_geometry_rows.empty:
+        missing_pairs = ", ".join(
+            f"{row.candidate_id}/{row.aoi_id}/{row.split}/{row.terrain_source_id}/{row.source_raster_stem}"
+            for row in missing_geometry_rows.itertuples(index=False)
+        )
+        raise TerrainFinalInventoryError(
+            "Failed to match scored evaluation rows back to candidate geometries for: "
+            f"{missing_pairs}"
+        )
+
+    if "output_vector_path_eval" in merged.columns:
+        merged = merged.drop(columns=["output_vector_path_eval"])
+
+    export_fields = [
+        "candidate_id",
+        "aoi_id",
+        "split",
+        "terrain_source_id",
+        "source_raster_stem",
+        "output_vector_path",
+        "pixel_count",
+        "area_map_units",
+        "bbox_width",
+        "bbox_height",
+        "bbox_aspect_ratio",
+        "mean_local_relief",
+        "max_local_relief",
+        "mean_slope",
+        "max_slope",
+        "matched_label_id",
+        "best_iou",
+        "target_label",
+        "score",
+        "predicted_label",
+    ]
+    ordered = cast(
+        pd.DataFrame,
+        merged[export_fields + ["geometry"]],
+    ).sort_values(
+        by=["split", "aoi_id", "terrain_source_id", "source_raster_stem", "candidate_id"],
+        ascending=True,
+        kind="mergesort",
+    )
+    inventory_gdf = gpd.GeoDataFrame(
+        ordered,
+        geometry="geometry",
+        crs=candidate_geometry_gdf.crs,
+    )
+    if inventory_gdf.crs is None and not inventory_gdf.empty:
+        raise TerrainFinalInventoryError("Candidate geometries have no CRS for final inventory.")
+
+    _write_candidate_vector(inventory_gdf, geojson_path)
+    _write_review_table(
+        _dataframe_record_rows(pd.DataFrame(inventory_gdf.drop(columns="geometry"))),
+        csv_path,
+        fieldnames=export_fields,
+    )
+
+    split_counts_series = cast(pd.Series, inventory_gdf["split"].value_counts(sort=False))
+    split_counts = {
+        str(split): int(count)
+        for split, count in sorted(split_counts_series.to_dict().items())
+    }
+    predicted_positive_count = int(cast(pd.Series, inventory_gdf["predicted_label"]).sum())
+    total_exported_features = int(len(inventory_gdf))
+    predicted_negative_count = total_exported_features - predicted_positive_count
+
+    summary = TerrainFinalInventorySummary(
+        project_name=terrain_candidates_summary.project_name,
+        project_root=str(project_root),
+        terrain_baseline_evaluation_artifact="",
+        terrain_candidates_artifact="",
+        output_root=str(final_root),
+        output_summary_path=str(summary_path),
+        geojson_output_path=str(geojson_path),
+        csv_output_path=str(csv_path),
+        total_exported_features=total_exported_features,
+        split_counts=split_counts,
+        predicted_positive_count=predicted_positive_count,
+        predicted_negative_count=predicted_negative_count,
+        classification_threshold=terrain_baseline_evaluation_summary.classification_threshold,
+        match_iou_threshold=terrain_baseline_evaluation_summary.match_iou_threshold,
+        artifacts=[
+            FinalInventoryArtifactRecord(
+                artifact_kind="geojson",
+                output_path=str(geojson_path),
+                row_count=total_exported_features,
+            ),
+            FinalInventoryArtifactRecord(
+                artifact_kind="csv",
+                output_path=str(csv_path),
+                row_count=total_exported_features,
+            ),
+        ],
+        records=[
+            FinalInventoryFeatureRecord.model_validate(record)
+            for record in _dataframe_record_rows(pd.DataFrame(inventory_gdf[export_fields]))
+        ],
+    )
+    return summary
+
+
+def write_final_inventory_summary(
+    summary: TerrainFinalInventorySummary, output_path: str | Path
 ) -> Path:
     return _write_json_artifact(summary, Path(output_path).expanduser().resolve())

@@ -12,6 +12,7 @@ This repository contains the executable implementation state for:
 - terrain-driven candidate generation
 - review artifact export
 - baseline evaluation artifact export
+- final inventory export
 
 ## Method summary
 
@@ -35,10 +36,8 @@ Implemented:
 - terrain-driven candidate generation
 - review artifact export
 - baseline evaluation artifact export
-- smoke tests
-
-Planned next:
 - final inventory export
+- smoke tests
 
 ## Development checks
 

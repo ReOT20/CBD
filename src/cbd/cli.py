@@ -16,12 +16,15 @@ from cbd.data.terrain import (
     TerrainBaselineEvaluationError,
     TerrainCandidatesError,
     TerrainDerivativesError,
+    TerrainFinalInventoryError,
     TerrainPreprocessingError,
     TerrainResolutionError,
     TerrainReviewError,
     derive_terrain_features,
     evaluate_terrain_baseline,
+    export_final_inventory,
     generate_terrain_candidates,
+    load_terrain_baseline_evaluation_summary,
     load_terrain_candidates_summary,
     load_terrain_derivatives_summary,
     load_terrain_preprocessing_summary,
@@ -29,6 +32,7 @@ from cbd.data.terrain import (
     prepare_terrain_review_artifacts,
     preprocess_terrain_inputs,
     resolve_terrain_inputs,
+    write_final_inventory_summary,
     write_terrain_baseline_evaluation_summary,
     write_terrain_candidates_summary,
     write_terrain_derivatives_summary,
@@ -578,6 +582,82 @@ def evaluate_terrain_baseline_command(
 
     console.print(table)
     console.print("[green]Terrain baseline evaluation completed successfully.[/green]")
+
+
+@app.command("export-final-inventory")
+def export_final_inventory_command(
+    terrain_baseline_evaluation_path: Annotated[
+        Path,
+        typer.Argument(help="Path to terrain_baseline_evaluation_summary.json"),
+    ],
+    terrain_candidates_path: Annotated[
+        Path,
+        typer.Argument(help="Path to terrain_candidates_summary.json"),
+    ],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root",
+            help=(
+                "Optional final inventory output root. Defaults to "
+                "outputs/final/terrain under the project root."
+            ),
+        ),
+    ] = None,
+) -> None:
+    try:
+        evaluation_summary = load_terrain_baseline_evaluation_summary(
+            terrain_baseline_evaluation_path
+        )
+        candidates_summary = load_terrain_candidates_summary(terrain_candidates_path)
+        final_inventory_summary = export_final_inventory(
+            evaluation_summary,
+            candidates_summary,
+            output_root=output_root,
+        )
+        final_inventory_summary = final_inventory_summary.model_copy(
+            update={
+                "terrain_baseline_evaluation_artifact": str(
+                    Path(terrain_baseline_evaluation_path).expanduser().resolve()
+                ),
+                "terrain_candidates_artifact": str(
+                    Path(terrain_candidates_path).expanduser().resolve()
+                ),
+            }
+        )
+        out = write_final_inventory_summary(
+            final_inventory_summary,
+            final_inventory_summary.output_summary_path,
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except (TerrainFinalInventoryError, TerrainReviewError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=3) from exc
+    except ValidationError as exc:
+        console.print("[red]Final inventory artifact validation failed.[/red]")
+        console.print(format_validation_error(exc))
+        raise typer.Exit(code=4) from exc
+
+    table = Table(title="Final scored candidate inventory summary")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("Project", final_inventory_summary.project_name)
+    table.add_row("Exported features", str(final_inventory_summary.total_exported_features))
+    table.add_row("Split counts", str(final_inventory_summary.split_counts))
+    table.add_row(
+        "Predicted positives",
+        str(final_inventory_summary.predicted_positive_count),
+    )
+    table.add_row(
+        "Predicted negatives",
+        str(final_inventory_summary.predicted_negative_count),
+    )
+    table.add_row("Artifact", str(out))
+
+    console.print(table)
+    console.print("[green]Final scored candidate inventory exported successfully.[/green]")
 
 
 if __name__ == "__main__":
