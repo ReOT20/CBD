@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 from pydantic import BaseModel, Field
+from pyproj import CRS  # pyright: ignore[reportMissingImports]
 from rasterio import DatasetReader
 from rasterio.errors import RasterioError
 from rasterio.features import shapes
@@ -644,6 +645,19 @@ def _load_clip_geometry(geometry_path: str | Path) -> tuple[BaseGeometry, str]:
     return cast(BaseGeometry, geometry), str(gdf.crs)
 
 
+def _reproject_geometry(
+    geometry: BaseGeometry,
+    *,
+    source_crs: str,
+    target_crs: str,
+) -> BaseGeometry:
+    if CRS.from_user_input(source_crs) == CRS.from_user_input(target_crs):
+        return geometry
+    geometry_frame = gpd.GeoDataFrame(geometry=[geometry], crs=source_crs)
+    reprojected = geometry_frame.to_crs(target_crs).geometry.iloc[0]
+    return cast(BaseGeometry, reprojected)
+
+
 def _coerce_nodata(value: float | int | str | None) -> float | None:
     if value is None:
         return None
@@ -833,16 +847,16 @@ def preprocess_terrain_inputs(
                             f"Raster has no CRS: {raster_path}"
                         )
                     raster_crs_str = str(raster_crs)
-                    if raster_crs_str != aoi_crs:
-                        raise TerrainPreprocessingError(
-                            f"CRS mismatch for AOI '{aoi.id}' and raster '{raster_path}': "
-                            f"AOI={aoi_crs}, raster={raster_crs_str}"
-                        )
+                    clip_geometry_in_raster_crs = _reproject_geometry(
+                        clip_geometry,
+                        source_crs=aoi_crs,
+                        target_crs=raster_crs_str,
+                    )
 
                     try:
                         clipped, transform = mask(
                             src,
-                            [mapping(clip_geometry)],
+                            [mapping(clip_geometry_in_raster_crs)],
                             crop=True,
                         )
                     except ValueError:

@@ -164,7 +164,7 @@ def test_preprocess_terrain_command_skips_non_intersection(tmp_path: Path) -> No
     assert payload["records"][0]["skip_reason"] == "no_intersection"
 
 
-def test_preprocess_terrain_command_fails_for_crs_mismatch(tmp_path: Path) -> None:
+def test_preprocess_terrain_command_reprojects_aoi_to_raster_crs(tmp_path: Path) -> None:
     aoi_path = tmp_path / "data" / "raw" / "aoi" / "train_aoi_01.geojson"
     raster_path = tmp_path / "data" / "raw" / "dem" / "nc_10m" / "tile_001.tif"
     _write_test_geojson(aoi_path, Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]), crs="EPSG:3857")
@@ -173,8 +173,17 @@ def test_preprocess_terrain_command_fails_for_crs_mismatch(tmp_path: Path) -> No
 
     result = runner.invoke(app, ["preprocess-terrain", str(artifact_path)])
 
-    assert result.exit_code == 3
-    assert "CRS mismatch" in result.stdout
+    assert result.exit_code == 0
+    assert "Terrain preprocessing completed successfully" in result.stdout
+
+    summary_path = (
+        tmp_path / "outputs" / "interim" / "terrain" / "terrain_preprocessing_summary.json"
+    )
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert payload["total_raster_outputs_written"] == 1
+    assert payload["records"][0]["status"] == "written"
+    assert payload["records"][0]["source_crs"] == "EPSG:4326"
+    assert payload["records"][0]["output_crs"] == "EPSG:4326"
 
 
 def test_preprocess_terrain_command_fails_for_missing_raster(tmp_path: Path) -> None:
